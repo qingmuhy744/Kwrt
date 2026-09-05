@@ -1,0 +1,140 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+// Based on Kwrt's SL-3000 bootstrap DTS, for the existing three-partition GPT.
+/dts-v1/;
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include "mt7981b.dtsi"
+
+/ {
+	model = "SL-3000 eMMC bootstrap (1 GiB)";
+	compatible = "sl,3000-emmc", "mediatek,mt7981";
+
+	aliases {
+		serial0 = &uart0;
+		ethernet0 = &gmac0;
+		led-boot = &status_red;
+		led-failsafe = &status_red;
+		led-running = &status_green;
+		led-upgrade = &status_blue;
+	};
+	chosen {
+		bootargs = "root=PARTLABEL=rootfs rootwait";
+		stdout-path = "serial0:115200n8";
+	};
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x40000000>;
+	};
+	reg_3p3v: regulator-3p3v {
+		compatible = "regulator-fixed";
+		regulator-name = "3.3V";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+	gpio-keys {
+		compatible = "gpio-keys";
+		button-mesh {
+			label = "mesh";
+			linux,code = <BTN_9>;
+			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+		};
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+		};
+	};
+	leds {
+		compatible = "gpio-leds";
+		status_red: led-0 {
+			label = "red:status";
+			gpios = <&pio 10 GPIO_ACTIVE_LOW>;
+		};
+		status_green: led-1 {
+			label = "green:status";
+			gpios = <&pio 11 GPIO_ACTIVE_LOW>;
+		};
+		status_blue: led-2 {
+			label = "blue:status";
+			gpios = <&pio 12 GPIO_ACTIVE_LOW>;
+		};
+	};
+};
+
+&eth {
+	status = "okay";
+	gmac0: mac@0 {
+		compatible = "mediatek,eth-mac";
+		reg = <0>;
+		phy-mode = "2500base-x";
+		fixed-link {
+			speed = <2500>;
+			full-duplex;
+			pause;
+		};
+	};
+	gmac1: mac@1 {
+		compatible = "mediatek,eth-mac";
+		reg = <1>;
+		status = "disabled";
+	};
+	mdio: mdio-bus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		switch@1f {
+			compatible = "mediatek,mt7531";
+			reg = <31>;
+			reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 { reg = <0>; label = "lan1"; };
+				port@1 { reg = <1>; label = "lan2"; };
+				port@2 { reg = <2>; label = "lan3"; };
+				port@3 { reg = <3>; label = "wan"; };
+				port@6 {
+					reg = <6>;
+					ethernet = <&gmac0>;
+					phy-mode = "2500base-x";
+					fixed-link {
+						speed = <2500>;
+						full-duplex;
+						pause;
+					};
+				};
+			};
+		};
+	};
+};
+
+&mmc0 {
+	bus-width = <8>;
+	cap-mmc-highspeed;
+	max-frequency = <52000000>;
+	no-sd;
+	no-sdio;
+	non-removable;
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+	vmmc-supply = <&reg_3p3v>;
+	status = "okay";
+};
+
+&pio {
+	mmc0_pins_default: mmc0-pins-default {
+		mux { function = "flash"; groups = "emmc_45"; };
+	};
+	mmc0_pins_uhs: mmc0-pins-uhs {
+		mux { function = "flash"; groups = "emmc_45"; };
+	};
+};
+
+// No phantom factory NVMEM: this bootstrap GPT has kernel/rootfs/storage only.
+// mt76 reads efuse, then uses its packaged default EEPROM if invalid.
+&wifi { status = "okay"; };
+&uart0 { status = "okay"; };
+&watchdog { status = "okay"; };
+&usb_phy { status = "okay"; };
+&xhci { status = "okay"; };

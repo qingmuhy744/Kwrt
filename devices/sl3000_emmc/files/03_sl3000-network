@@ -1,0 +1,18 @@
+#!/bin/sh
+. /lib/functions/uci-defaults.sh
+. /lib/functions/system.sh
+
+[ "$(board_name)" = "sl,3000-emmc" ] || exit 0
+board_config_update
+ucidef_set_interfaces_lan_wan 'lan1 lan2 lan3' wan
+
+# The bootstrap layout has no factory MAC cell. Use a stable, locally administered
+# address derived from the physical eMMC CID, never a shared hardcoded MAC.
+cid_file=/sys/block/mmcblk0/device/cid
+[ -r "$cid_file" ] || exit 1
+mac=$(sha256sum "$cid_file" | cut -c1-10 | sed 's/../:&/g')
+mac="02$mac"
+ucidef_set_interface_macaddr lan "$mac"
+ucidef_set_interface_macaddr wan "$(macaddr_add "$mac" 1)"
+board_config_flush
+exit 0

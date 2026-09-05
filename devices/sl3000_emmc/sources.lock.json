@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "openwrt": {
+    "url": "https://github.com/openwrt/openwrt.git",
+    "release": "25.12.5",
+    "commit": "f0a60eee2fe051741c643ea6118718aae1ef17fb"
+  },
+  "feeds": {
+    "packages": {"url": "https://github.com/openwrt/packages.git", "commit": "5caa62e0bc9f7fb9b0c12a23267bceb7724214dd"},
+    "luci": {"url": "https://github.com/openwrt/luci.git", "commit": "128a7812f4be233c5dd7f7466f534fd888785caf"},
+    "routing": {"url": "https://github.com/openwrt/routing.git", "commit": "3d7d0dc7fa43d3eb09498417407e95a6552e5312"},
+    "telephony": {"url": "https://github.com/openwrt/telephony.git", "commit": "2618106d5846a4a542fdf5809f0d3ed228ce439b"},
+    "video": {"url": "https://github.com/openwrt/video.git", "commit": "094bf58da6682f895255a35a84349a79dab4bf95"},
+    "passwall_packages": {"url": "https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git", "commit": "3e11c458c552aefd348232c627fd1ed9f8f08e41"},
+    "passwall": {"url": "https://github.com/Openwrt-Passwall/openwrt-passwall.git", "commit": "56adb0e2cbcf17e419524d46841d77a79474f327", "release": "26.9.1-1"},
+    "openclash": {"url": "https://github.com/vernesong/OpenClash.git", "commit": "c3a33c1d3407956fdf8f0e0b7c1a4c52e6ad9593", "release": "v0.47.156"}
+  },
+  "mihomo": {
+    "version": "1.19.30",
+    "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-linux-arm64-v1.19.30.gz",
+    "sha256": "58896873736d28628f66de3677c8654fa0f180662523148e136cff4f6e890069"
+  },
+  "mt76_eeprom": {
+    "commit": "39c960c3ada558b4c2e7915772483d3731573d09",
+    "url": "https://raw.githubusercontent.com/openwrt/mt76/39c960c3ada558b4c2e7915772483d3731573d09/firmware/mt7981_eeprom_mt7976_dbdc.bin",
+    "sha256": "97238e2228897a7388370604cbe7175e0bfa0cc35f562b64330b12c1aaeeb751"
+  }
+}

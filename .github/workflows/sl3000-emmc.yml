@@ -1,0 +1,145 @@
+name: SL-3000 eMMC (Pinned OpenWrt)
+
+on:
+  workflow_dispatch:
+    inputs:
+      clean_build:
+        description: Ignore download and compiler caches
+        type: boolean
+        default: false
+      publish_release:
+        description: Publish validated outputs as a prerelease (no hardware certification)
+        type: boolean
+        default: false
+      public_setup_password:
+        description: I accept that the image contains a PUBLIC TEMPORARY Wi-Fi password
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sl3000-emmc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      TZ: Asia/Shanghai
+      RECIPE: devices/sl3000_emmc
+      OPENWRT: ${{ github.workspace }}/openwrt-sl3000
+    steps:
+      - name: Checkout recipe
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Preflight and unit tests
+        env:
+          DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+          PUBLIC_SETUP_PASSWORD: ${{ inputs.public_setup_password }}
+        run: |
+          if [[ "$REPOSITORY_PRIVATE" != true && "$PUBLIC_SETUP_PASSWORD" != true ]]; then
+            echo 'Public images expose their Wi-Fi password. Confirm use of a public temporary password.'
+            exit 1
+          fi
+          python3 -m unittest discover -s "$RECIPE/tests" -v
+          PYTHONPATH="$RECIPE" python3 -c 'import os; from inject_defaults import validate_password; validate_password(os.environ.get("DEFAULT_WIFI_PASSWORD", ""))'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
+            gettext git libncurses-dev libssl-dev python3 python3-setuptools \
+            python3-pyelftools rsync swig unzip zlib1g-dev file wget zstd \
+            libelf-dev libtool autoconf automake cmake ninja-build pkgconf \
+            ccache curl jq patch perl time squashfs-tools
+          df -h .
+
+      - name: Restore download and compiler caches
+        if: ${{ !inputs.clean_build }}
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            openwrt-sl3000/dl
+            openwrt-sl3000/.ccache
+          key: sl3000-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config') }}-${{ github.run_id }}
+          restore-keys: |
+            sl3000-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config') }}-
+
+      - name: Prepare pinned source and feeds
+        run: python3 "$RECIPE/prepare.py" "$OPENWRT"
+
+      - name: Resolve and verify build configuration
+        run: |
+          make -C "$OPENWRT" defconfig
+          python3 "$RECIPE/verify.py" config "$OPENWRT"
+
+      - name: Inject setup defaults
+        env:
+          DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
+        run: python3 "$RECIPE/inject_defaults.py" "$OPENWRT"
+
+      - name: Download verified package sources
+        run: make -C "$OPENWRT" download -j8
+
+      - name: Compile
+        run: make -C "$OPENWRT" -j2
+
+      - name: Verify and collect only approved outputs
+        env:
+          DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
+        run: |
+          python3 "$RECIPE/verify.py" artifacts "$OPENWRT" --output "$RUNNER_TEMP/sl3000-release"
+          cd "$RUNNER_TEMP/sl3000-release"
+          sha256sum -c sha256sums
+
+      - name: Upload verified firmware
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sl3000-emmc-${{ github.run_id }}
+          path: ${{ runner.temp }}/sl3000-release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Build summary
+        run: |
+          {
+            echo '### SL-3000 eMMC'
+            echo 'OpenWrt 25.12.5, pinned feeds and proxy components.'
+            echo 'Image checks passed. Hardware acceptance is still required.'
+            echo 'Only sysupgrade/initramfs and verification records are exported. No BL2/FIP/GPT.'
+            echo 'The setup Wi-Fi password is extractable from the image. Change it on first login.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: ${{ inputs.publish_release }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified output
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sl3000-emmc-${{ github.run_id }}
+          path: release
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RECIPE_COMMIT: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          cd release
+          sha256sum -c sha256sums
+          gh release create "sl3000-25.12.5-${RUN_NUMBER}" ./* \
+            --target "$RECIPE_COMMIT" --prerelease \
+            --title "SL-3000 eMMC / OpenWrt 25.12.5 / test ${RUN_NUMBER}" \
+            --notes-file README.md

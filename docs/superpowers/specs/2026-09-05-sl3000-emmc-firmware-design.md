@@ -4,7 +4,7 @@
 
 为当前 SL-3000 eMMC 设备建立独立、可重复的 GitHub Actions 构建目标。固件基于 OpenWrt 25.12 和 Linux 6.12，预装日常所需网络组件，同时避免当前 23.05 Snapshot 中内核 ABI、软件源和 PassWall 依赖不一致的问题。
 
-构建产物适配设备现有的 SPI NOR U-Boot 和 eMMC GPT 布局。CI 不构建、不发布，也不写入 BL2、FIP 或 GPT。
+构建产物以设备现有的 U-Boot 和 eMMC GPT 布局为兼容目标，须经实机验证；当前内核没有暴露 SPI 分区，不能据此断言引导程序的位置。CI 不构建、不发布，也不写入 BL2、FIP 或 GPT。
 
 ## 范围
 
@@ -31,14 +31,14 @@
 
 ## 构建架构
 
-在现有 Kwrt 仓库中新增 SL-3000 专用配置，复用公共补丁和已有设备 DTS，不复制为独立仓库。
+在现有 Kwrt 仓库中新增 SL-3000 专用配置，提取必要的设备支持，不执行会修改 ABI 校验和拉取滚动依赖的通用脚本。
 
 构建流程如下：
 
 1. 用户通过 `workflow_dispatch` 手动触发构建。
 2. 工作流检出固定的 OpenWrt 25.12 commit。
 3. 工作流检出固定的 feeds、PassWall、OpenClash 和 Mihomo 版本。
-4. 应用 Kwrt 公共补丁及 `mediatek_filogic` 的 SL-3000 eMMC 补丁。
+4. 仅应用经过核对的 SL-3000 eMMC 设备支持。
 5. 合并 SL-3000 专用 `.config` 并运行 `make defconfig`。
 6. 从 `DEFAULT_WIFI_PASSWORD` 注入首次启动 Wi-Fi 密码。
 7. 断言设备目标、关键软件包和内核模块均为内置状态。
@@ -50,7 +50,7 @@
 
 ## 设备与升级边界
 
-目标设备标识为 `sl,3000-emmc`，使用仓库现有的 `mt7981b-sl-3000-emmc.dts` 和 sysupgrade 平台处理逻辑。
+目标设备标识为 `sl,3000-emmc`，基于仓库现有 DTS 修正为实际 1 GiB 内存，并移除当前 GPT 不存在的 `factory` NVMEM 引用。当前 vendor Wi-Fi 驱动日志显示使用默认 EEPROM；主线 mt76 校准回退需要实机验证。升级继续采用按标签定位 `kernel` 和 `rootfs` 的 sysupgrade tar 处理逻辑。
 
 设备当前 eMMC GPT 布局为：
 
@@ -116,7 +116,7 @@ UPnP 默认关闭，由用户在 LuCI 中按需启用。网络唤醒组件预装
 - 密码：由 `DEFAULT_WIFI_PASSWORD` 注入
 - root 密码：未设置，首次登录后由用户设置
 
-工作流在 Secret 缺失、为空或长度不足 8 个字符时必须失败。任何步骤不得把密码输出到日志、artifact、`.config` 或 manifest。
+工作流在 Secret 缺失、为空或不是 8 至 63 个可打印 ASCII 字符时必须失败。密码不得写入源码、构建日志、`.config` 或 manifest，但必然存在于固件镜像中。用户已选择使用可公开的临时密码，首次登录后必须修改；公开仓库构建须显式确认这一点。
 
 ## CI 接口与产物
 
@@ -180,4 +180,4 @@ CI 产物包括：
 - 关键内核模块已加载。
 - PassWall、OpenClash、Tailscale、UPnP 和 WOL 包存在。
 
-验证后才使用现有 U-Boot Web 恢复入口或系统升级功能写入 `sysupgrade.bin`。升级失败时使用现有 U-Boot Web 页面恢复当前可用的 sysupgrade 镜像。整个流程不修改 U-Boot 和 GPT。
+验证后才使用系统升级功能写入 `sysupgrade.bin`。U-Boot Web 恢复入口接受的镜像格式须单独确认，不能假定它接受 sysupgrade tar。首次升级前保留已验证的恢复镜像与恢复入口。整个流程不修改 U-Boot 和 GPT。
