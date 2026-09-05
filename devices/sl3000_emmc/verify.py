@@ -118,7 +118,14 @@ def verify_rootfs(image, scratch, password):
         raise ValueError("Mihomo is not a little-endian AArch64 ELF executable")
     eeprom = root_file(root, "lib/firmware/mediatek/mt7981_eeprom_mt7976_dbdc.bin")
     lock = json.loads((HERE / "sources.lock.json").read_text())
-    if hashlib.sha256(eeprom).hexdigest() != lock["mt76_eeprom"]["sha256"]:
+    import rf_test
+    if rf_test.enabled():
+        expected_eeprom = rf_test.calibration()
+        if eeprom != expected_eeprom:
+            raise ValueError("Private runtime EEPROM was not embedded exactly")
+        if root_file(root, rf_test.MARKER_PATH) != rf_test.marker(expected_eeprom):
+            raise ValueError("Private RF test marker missing or changed")
+    elif hashlib.sha256(eeprom).hexdigest() != lock["mt76_eeprom"]["sha256"]:
         raise ValueError("Default EEPROM missing or changed")
     shadow = root_file(root, "etc/shadow").decode()
     root_password = next(line.split(":")[1] for line in shadow.splitlines() if line.startswith("root:"))
@@ -176,6 +183,8 @@ def artifacts(tree, destination):
         "supported_devices": metadata["supported_devices"],
         "wifi_password_is_public_temporary": True,
     }
+    from rf_test import enabled
+    provenance["wifi_profile"] = "private-runtime-eeprom-ab-test" if enabled() else "generic-bootstrap"
     (destination / "build-info.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (destination / "sha256sums").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in sorted(destination.iterdir())))
     print("Validated SL-3000 images, packages, defaults and allowlisted artifacts. Hardware validation still required.")

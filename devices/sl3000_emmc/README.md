@@ -12,7 +12,7 @@
 - 不提供或写入 BL2、FIP、GPT、U-Boot。不要重刷分区表。
 - 禁用在线自动固件升级入口，避免自定义设备跳转到不匹配的官方镜像；更新内核和驱动请重新编译整套固件，不要强制安装其他 ABI 的 kmod。
 
-2026-09-05 只读检查发现：当前 GPT 没有 `factory`，当前 vendor Wi-Fi 驱动报告 EEPROM 无效并使用默认文件。本目标移除不存在的 NVMEM 引用，包含与锁定 mt76 源码配套的默认 EEPROM，以便验证主线驱动。它**不能恢复每台设备的原厂射频校准**，双频、功率、吞吐和持续运行必须实测。以太网和 AP MAC 从设备 eMMC CID 派生，避免所有机器共享默认 EEPROM 的 MAC；升级后 MAC 可能与旧固件不同。
+2026-09-05 首次只读检查发现：设备 GPT 没有 `factory`，当时的 vendor Wi-Fi 驱动报告 EEPROM 无效并使用默认文件。默认构建移除不存在的 NVMEM 引用，包含与锁定 mt76 源码配套的通用 EEPROM。它**不能恢复每台设备的原厂射频校准**。后续实测该默认构建存在 Wi-Fi 覆盖和吞吐问题；不能当作已修复版本使用。以太网和 AP MAC 从设备 eMMC CID 派生，避免所有机器共享默认 EEPROM 的 MAC；升级后 MAC 可能与旧固件不同。
 
 ## 内置内容
 
@@ -44,6 +44,28 @@ PassWall、OpenClash、Tailscale、UPnP 默认关闭。没有订阅、节点、�
 产物只包括设备 sysupgrade、initramfs FIT、包清单、OpenWrt/kernel 配置、来源锁定清单、构建信息和 SHA-256。不会上传完整构建目录、注入密码的脚本或未筛选的 `bin/targets` 目录。失败构建不发布镜像。
 
 所有来源见 `sources.lock.json`，官方 feeds 与 25.12.5 发布的 `feeds.buildinfo` 一致。第三方插件也按 commit 固定；Mihomo 使用上游发布的压缩二进制并验证 SHA-256。升级这些来源需要显式修改锁文件及相应包配方后重跑验证。固定源码不代表比特级可重复，也不能替代安全更新。
+
+### 本机射频数据 A/B 测试
+
+`rf_test` 默认关闭。这是**只供原始采集设备使用的实验镜像**，不是其他 SL-3000 的通用校准文件，也不代表问题已经解决。
+
+- 正常工作的 ImmortalWrt / mt_wifi 7.6.6.1 固件使用了不同的 iPA/iLNA EEPROM，并合并了本机 A-die 校准值。通用公开 iPA/iLNA 文件与该固件 ROM 数据也不完全相同，因此首轮直接测试该设备的实际运行时数据。
+- `rf_test.py capture` 通过已认证的 SSH 连接，只发送不含 `=` 的 `iwpriv ... e2p` 读取命令，连续读取两遍完整 4096 字节。仅接受 MT7981 / MT7976C / A-die v1，预校准标志必须为零；相对 ROM 的差异必须全部落在已确认的芯片校准位置。不会写 EEPROM、eFuse、闪存或重启 Wi-Fi。
+- 采集产生的 `runtime-eeprom.bin`、`calibration-secret.json`、`artifact-passphrase.txt` 只保存在本地私有目录，禁止提交。JSON 设置为 Secret `SL3000_RF_TEST_CALIBRATION`，随机 32 字节十六进制解密口令设置为 Secret `SL3000_RF_TEST_PASSPHRASE`。不能用日常账号密码替代该随机口令。
+- 本次测试只在 rootfs overlay 中替换 mt76 加载的默认 EEPROM 文件，不改锁定的 OpenWrt、内核、mt76、MCU 固件或分区布局，也不添加厂商驱动；不额外调整无线信道或 UCI 发射功率设置。公开 `sources.lock.json` 仍记录公共源码；私人数据的校验值记录在加密包内的镜像标记 `/etc/sl3000-rf-test.json`，`build-info.json` 标记测试类型。
+- 构建时选 `rf_test=true`、`publish_release=false`、`public_setup_password=true`，`clean_build=false` 可复用旧下载和编译缓存。测试构建不保存新的编译缓存；下载缓存只含公开源码。
+- 固件校验仍检查包、分区容量、首启设置、账号状态，并逐字节确认 sysupgrade 内嵌 EEPROM 与输入一致。仅上传 `sl3000-emmc-rf-test-<run id>` 中的 AES-256 加密归档和密文 SHA-256，不上传明文固件，不允许发布 Release。
+- 下载后使用本地保留的 `artifact-passphrase.txt` 解密 `sl3000-rf-test.tar.gpg`，再检查包内 `sha256sums`。解密后的镜像包含本机数据，不能转发。丢失口令将无法解密该次构建，应妥善备份。
+- 此构建不会自动刷机。实际测试前必须备好正常固件、独立互联网和有线管理方式；RAM 启动方式未经验证前不应假定 initramfs 能安全临时启动。实测双频、近距离和原先信号差的位置，再决定是否实现长期的逐机校准加载。
+
+采集示例（SSH ControlMaster 应先手动认证；不要在命令或仓库中写路由器密码）：
+
+```sh
+python3 devices/sl3000_emmc/rf_test.py capture \
+  --control /path/to/ssh-control-socket \
+  --reference /private/path/MT7981_iPAiLNA_EEPROM.bin \
+  --output /private/path/new-rf-test-directory
+```
 
 ### 缓存与编译并发
 

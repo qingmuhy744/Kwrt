@@ -1,1 +1,4 @@
 __pycache__/
+runtime-eeprom.bin
+calibration-secret.json
+artifact-passphrase.txt

@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import verify
+import rf_test
+from test_rf_test import fixture, private_env
 
 IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
 INITRAMFS_NAME = f"{IMAGE_PREFIX}-initramfs.itb"
@@ -136,3 +138,42 @@ inspect:
         with self.assertRaisesRegex(ValueError, "Invalid rootfs fixture"):
             self.collect(rootfs_error=ValueError("Invalid rootfs fixture"))
         self.assertFalse(self.output.exists())
+
+
+class RootfsRFTests(unittest.TestCase):
+    def test_private_rootfs_requires_exact_eeprom_and_marker(self):
+        from inject_defaults import shell_assignment
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            image = scratch / "image.bin"
+            with tarfile.open(image, "w") as archive:
+                info = tarfile.TarInfo(f"sysupgrade-{verify.PROFILE}/root")
+                info.size = 4
+                archive.addfile(info, io.BytesIO(b"hsqs"))
+            core = bytearray(20)
+            core[:6] = b"\x7fELF\x02\x01"
+            core[18:20] = b"\xb7\x00"
+            files = {
+                "etc/uci-defaults/99-sl3000-setup": (ROOT / "firstboot.sh").read_text().replace(
+                    "# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(PASSWORD)).encode(),
+                "etc/openclash/core/clash_meta": bytes(core),
+                rf_test.FIRMWARE_PATH: fixture(),
+                rf_test.MARKER_PATH: rf_test.marker(fixture()),
+                "etc/shadow": b"root::0:0:99999:7:::\n",
+            }
+            with patch.dict(os.environ, private_env()), \
+                    patch.object(verify, "root_file", side_effect=lambda _, name: files[name]), \
+                    patch.object(verify.subprocess, "check_output", return_value=""):
+                verify.verify_rootfs(image, scratch, PASSWORD)
+                files[rf_test.FIRMWARE_PATH] = b"\0" * rf_test.SIZE
+                with self.assertRaisesRegex(ValueError, "not embedded exactly"):
+                    verify.verify_rootfs(image, scratch, PASSWORD)
+                files[rf_test.FIRMWARE_PATH] = fixture()
+                files[rf_test.MARKER_PATH] = b"wrong marker"
+                with self.assertRaisesRegex(ValueError, "marker missing or changed"):
+                    verify.verify_rootfs(image, scratch, PASSWORD)
+
+    def test_private_secret_cannot_be_omitted_to_use_generic_eeprom(self):
+        with patch.dict(os.environ, {"SL3000_RF_TEST": "true", rf_test.CALIBRATION_ENV: ""}):
+            with self.assertRaisesRegex(ValueError, "private RF calibration"):
+                rf_test.calibration()
