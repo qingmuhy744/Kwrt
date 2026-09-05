@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: Ignore download and compiler caches
+        description: Skip restoring caches; save fresh caches after successful stages
         type: boolean
         default: false
       publish_release:
@@ -27,10 +27,17 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
     env:
       TZ: Asia/Shanghai
       RECIPE: devices/sl3000_emmc
       OPENWRT: ${{ github.workspace }}/openwrt-sl3000
+      CCACHE_DIR: ${{ github.workspace }}/openwrt-sl3000/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}/openwrt-sl3000
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2GiB
     steps:
       - name: Checkout recipe
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -60,16 +67,45 @@ jobs:
             ccache curl jq patch perl time squashfs-tools
           df -h .
 
-      - name: Restore download and compiler caches
+      - name: Compute independent cache keys
+        id: cache_keys
+        env:
+          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**') }}
+        run: |
+          namespace="sl3000-v2-ubuntu-24.04-${RUNNER_OS}-${RUNNER_ARCH}"
+          download_prefix="${namespace}-dl-${RECIPE_HASH}-"
+          compiler_prefix="${namespace}-ccache-${RECIPE_HASH}-"
+          {
+            echo "download_prefix=$download_prefix"
+            echo "download_fallback=${namespace}-dl-"
+            echo "download_key=${download_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "compiler_prefix=$compiler_prefix"
+            echo "compiler_key=${compiler_prefix}${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Restore downloaded sources
+        id: restore_downloads
         if: ${{ !inputs.clean_build }}
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: |
-            openwrt-sl3000/dl
-            openwrt-sl3000/.ccache
-          key: sl3000-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config') }}-${{ github.run_id }}
+          path: openwrt-sl3000/dl
+          key: ${{ steps.cache_keys.outputs.download_key }}
           restore-keys: |
-            sl3000-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config') }}-
+            ${{ steps.cache_keys.outputs.download_prefix }}
+            ${{ steps.cache_keys.outputs.download_fallback }}
+
+      - name: Restore compiler cache
+        id: restore_compiler
+        if: ${{ !inputs.clean_build }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: openwrt-sl3000/.ccache
+          key: ${{ steps.cache_keys.outputs.compiler_key }}
+          restore-keys: ${{ steps.cache_keys.outputs.compiler_prefix }}
 
       - name: Prepare pinned source and feeds
         run: python3 "$RECIPE/prepare.py" "$OPENWRT"
@@ -85,10 +121,71 @@ jobs:
         run: python3 "$RECIPE/inject_defaults.py" "$OPENWRT"
 
       - name: Download verified package sources
-        run: make -C "$OPENWRT" download -j8
+        id: download
+        run: /usr/bin/time -f 'Download elapsed %E; peak process RSS %M KiB' make -C "$OPENWRT" download -j8
+
+      - name: Save downloaded sources
+        if: ${{ !cancelled() && steps.download.outcome == 'success' && (inputs.clean_build || !startsWith(steps.restore_downloads.outputs.cache-matched-key, steps.cache_keys.outputs.download_prefix)) }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: openwrt-sl3000/dl
+          key: ${{ steps.cache_keys.outputs.download_key }}
+
+      - name: Select build parallelism and reset cache statistics
+        id: resources
+        run: |
+          jobs=$(python3 "$RECIPE/ci_resources.py")
+          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
+          ccache --zero-stats
+          free -h
+          df -h .
 
       - name: Compile
-        run: make -C "$OPENWRT" -j2
+        id: compile
+        env:
+          BUILD_JOBS: ${{ steps.resources.outputs.jobs }}
+        run: /usr/bin/time -v -o "$RUNNER_TEMP/sl3000-compile-time.txt" make -C "$OPENWRT" -j"$BUILD_JOBS"
+
+      - name: Record build and cache statistics
+        id: cache_stats
+        if: ${{ !cancelled() && (steps.compile.outcome == 'success' || steps.compile.outcome == 'failure') }}
+        continue-on-error: true
+        env:
+          BUILD_JOBS: ${{ steps.resources.outputs.jobs }}
+          DOWNLOAD_CACHE: ${{ steps.restore_downloads.outputs.cache-matched-key }}
+          COMPILER_CACHE: ${{ steps.restore_compiler.outputs.cache-matched-key }}
+        run: |
+          ccache_bin="$OPENWRT/staging_dir/host/bin/ccache"
+          if [[ ! -x "$ccache_bin" ]]; then
+            ccache_bin=/usr/bin/ccache
+          fi
+          "$ccache_bin" --cleanup
+          "$ccache_bin" --show-stats | tee "$RUNNER_TEMP/sl3000-ccache-stats.txt"
+          {
+            echo '### Build performance'
+            echo
+            echo "Make jobs: $BUILD_JOBS"
+            echo
+            echo "Download cache restored: ${DOWNLOAD_CACHE:-none}"
+            echo
+            echo "Compiler cache restored: ${COMPILER_CACHE:-none}"
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/sl3000-compile-time.txt" "$RUNNER_TEMP/sl3000-ccache-stats.txt"
+            du -sh "$OPENWRT/dl" "$CCACHE_DIR"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save compiler cache
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' && steps.cache_stats.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: openwrt-sl3000/.ccache
+          key: ${{ steps.cache_keys.outputs.compiler_key }}
 
       - name: Verify and collect only approved outputs
         env:

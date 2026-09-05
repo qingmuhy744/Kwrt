@@ -37,13 +37,22 @@ PassWall、OpenClash、Tailscale、UPnP 默认关闭。没有订阅、节点、�
 
 1. 在仓库 Settings → Secrets and variables → Actions 中设置 `DEFAULT_WIFI_PASSWORD`，仅使用准备公开的临时密码。
 2. 打开 Actions → **SL-3000 eMMC (Pinned OpenWrt)** → Run workflow。
-3. 公开仓库必须勾选 `public_setup_password`。`clean_build` 忽略缓存；默认每次都在新目录编译，仅缓存下载文件和编译器缓存。
+3. 公开仓库必须勾选 `public_setup_password`。`clean_build` 只跳过旧缓存恢复，成功阶段仍保存新缓存供下次使用；每次都在新目录编译。
 4. `publish_release` 默认关闭；启用后也只创建 prerelease，不能表示硬件验收通过。
 5. 下载 `sl3000-emmc-<run id>`，解压后用 `sha256sum -c sha256sums`（macOS 可用 `shasum -a 256 -c sha256sums`）验证。
 
 产物只包括设备 sysupgrade、initramfs FIT、包清单、OpenWrt/kernel 配置、来源锁定清单、构建信息和 SHA-256。不会上传完整构建目录、注入密码的脚本或未筛选的 `bin/targets` 目录。失败构建不发布镜像。
 
 所有来源见 `sources.lock.json`，官方 feeds 与 25.12.5 发布的 `feeds.buildinfo` 一致。第三方插件也按 commit 固定；Mihomo 使用上游发布的压缩二进制并验证 SHA-256。升级这些来源需要显式修改锁文件及相应包配方后重跑验证。固定源码不代表比特级可重复，也不能替代安全更新。
+
+### 缓存与编译并发
+
+- 下载目录 `dl` 与编译缓存 `.ccache` 分别恢复、保存，不缓存整个源码树、`build_dir`、`staging_dir`、注入密码的脚本或成品固件。
+- 下载成功后立即保存源码缓存，即使后续编译失败也能复用。优先匹配相同配方，未命中时回退到同一 runner 环境的下载缓存，仍执行源码下载校验。普通构建命中相同配方时不重复上传；干净重建总是尝试保存新快照。
+- 编译缓存只在编译成功并完成缓存统计后保存，不依赖后续固件上传成功。缓存键隔离 runner 系统、架构和完整构建配方；包含 run ID 与重跑次数，避免覆盖不可变缓存。ccache 按编译器内容识别兼容性，并限制为 2 GiB。缓存服务失败不会绕过构建与产物校验，也不应单独导致固件构建失败。
+- 编译任务数取 CPU 数和内存预算的较小值：从可用内存中预留 1 GiB，每个 make 任务按 3 GiB 预算，至少为 1。公开仓库的标准 `ubuntu-24.04` runner 为 4 CPU / 16 GB，内存充足时使用 `-j4`；内存不足时自动降低。这个预算不是硬性内存限制，Go、Rust 和链接阶段仍需要观察实际占用。下载仍使用 `-j8`。
+- Actions 日志记录实际 CPU、可用内存和下载耗时，摘要记录编译耗时、并发数、恢复的缓存键、ccache 命中统计和缓存大小。ccache 主要加速 C/C++，暂不增加 Go/Rust 编译缓存，不承诺固定提速比例。
+- 工作流更新仅作用于使用新提交启动的构建；已经运行的任务不会自动获得这些改动。
 
 ## 首次验收与升级
 
