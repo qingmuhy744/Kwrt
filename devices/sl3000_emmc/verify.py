@@ -137,12 +137,13 @@ def artifacts(tree, destination):
     validate_config(config)
     target = tree / "bin/targets/mediatek/filogic"
     sysupgrade = one(target.glob(f"*-{PROFILE}-squashfs-sysupgrade.bin"), "sysupgrade")
-    initramfs = one(target.glob(f"*-{PROFILE}-initramfs-kernel.itb"), "initramfs")
+    initramfs = one(target.glob(f"*-{PROFILE}-initramfs.itb"), "initramfs")
     manifest = one(target.glob(f"*-{PROFILE}.manifest"), "manifest")
     validate_manifest(manifest.read_text())
     validate_tar(sysupgrade)
-    if initramfs.open("rb").read(4) != b"\xd0\x0d\xfe\xed":
-        raise ValueError("Initramfs image is not FIT")
+    with initramfs.open("rb") as stream:
+        if stream.read(4) != b"\xd0\x0d\xfe\xed":
+            raise ValueError("Initramfs image is not FIT")
     fwtool = tree / "staging_dir/host/bin/fwtool"
     with tempfile.TemporaryDirectory(prefix="sl3000-verify-") as directory:
         scratch = Path(directory)
