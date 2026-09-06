@@ -99,11 +99,19 @@ sl3000_check_image "$2"
         from verify import validate_config
         config = (ROOT / ".config").read_text()
         validate_config(config)
-        for package in ("tailscale", "kmod-nft-socket", "luci-app-openclash"):
+        for package in ("tailscale", "kmod-nft-socket", "luci-app-openclash", "ruby", "ruby-yaml"):
             for setting in ("m", "n"):
                 with self.subTest(package=package, setting=setting):
                     with self.assertRaises(ValueError):
                         validate_config(config.replace(f"CONFIG_PACKAGE_{package}=y", f"CONFIG_PACKAGE_{package}={setting}"))
+
+    def test_ruby_yjit_is_explicitly_disabled_and_cannot_return(self):
+        from verify import validate_config
+        config = (ROOT / ".config").read_text()
+        self.assertIn("# CONFIG_RUBY_ENABLE_YJIT is not set", config.splitlines())
+        validate_config(config)
+        with self.assertRaisesRegex(ValueError, "Ruby YJIT"):
+            validate_config(config + "\nCONFIG_RUBY_ENABLE_YJIT=y\n")
 
     def test_rejects_multiple_targets(self):
         from verify import validate_config

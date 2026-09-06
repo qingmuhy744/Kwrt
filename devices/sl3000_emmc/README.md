@@ -19,6 +19,7 @@
 - Tailscale 与官方 feed 的 `luci-app-tailscale-community`。
 - PassWall、Xray、sing-box、ChinaDNS-NG、dns2socks、dnsmasq-full、nft socket/tproxy 模块。
 - OpenClash 与已内置的 AArch64 Mihomo Meta 核心，首次配置不需要另行下载核心。
+- 保留 OpenClash 所需的 Ruby/YAML，关闭可选的 Ruby YJIT，避免因此从源码构建 Rust/LLVM 工具链。配置校验拒绝重新开启 YJIT，产物校验检查未生成 Rust 主机工具链；不改变代理核心、无线驱动或 EEPROM。
 - nftables UPnP、LuCI 网络唤醒与 etherwake。
 - MMC、USB 3、ext4、F2FS、block-mount 和检查工具。
 
@@ -99,6 +100,8 @@ python3 devices/sl3000_emmc/rf_test.py capture \
 - 编译任务数取 CPU 数和内存预算的较小值：从可用内存中预留 1 GiB，每个 make 任务按 3 GiB 预算，至少为 1。公开仓库的标准 `ubuntu-24.04` runner 为 4 CPU / 16 GB，内存充足时使用 `-j4`；内存不足时自动降低。这个预算不是硬性内存限制，Go、Rust 和链接阶段仍需要观察实际占用。下载仍使用 `-j8`。
 - Actions 日志记录实际 CPU、可用内存和下载耗时，摘要记录编译耗时、并发数、恢复的缓存键、ccache 命中统计和缓存大小。ccache 主要加速 C/C++，暂不增加 Go/Rust 编译缓存，不承诺固定提速比例。
 - 工作流更新仅作用于使用新提交启动的构建；已经运行的任务不会自动获得这些改动。
+- 可在 `compare_run` 填入同一工作流、同一分支的基准构建编号。构建完成后，摘要自动对比两轮成功的 `Compile` 步骤耗时，列出节省或增加的时间和百分比，不计排队、下载、校验和上传时间。仅读取 GitHub 步骤元数据，不读取或上传私人校准数据；对照报告失败不会影响固件产物。
+- 首轮关闭 YJIT 的对照基准为 NOR 诊断构建 `34017054854`（提交 `238df703`）。两轮保持 `rf_test=true`、`nor_probe=true`、`clean_build=false`、不发布 Release；Go、编译并发、缓存策略和源码锁定均不变。基准未命中编译缓存，新配方的首次构建也没有匹配的编译缓存；两轮均允许下载缓存。最终仍需检查实际 runner 和缓存统计，不能把虚拟机性能波动当作确定的优化收益。
 
 ## 首次验收与升级
 

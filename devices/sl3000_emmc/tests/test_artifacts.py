@@ -140,6 +140,17 @@ inspect:
             self.collect(rootfs_error=ValueError("Invalid rootfs fixture"))
         self.assertFalse(self.output.exists())
 
+    def test_unexpected_rust_toolchain_prevents_export(self):
+        for prefix in ("host", "hostpkg", "target-aarch64_cortex-a53_musl/host"):
+            with self.subTest(prefix=prefix):
+                rustc = self.tree / "staging_dir" / prefix / "bin/rustc"
+                rustc.parent.mkdir(parents=True)
+                rustc.write_bytes(b"unexpected host toolchain")
+                with self.assertRaisesRegex(ValueError, "Rust host toolchain"):
+                    self.collect()
+                self.assertFalse(self.output.exists())
+                rustc.unlink()
+
     def test_nor_profile_checks_both_fit_payloads_before_export(self):
         from test_nor_probe import kernel_config, probe_env
         config = next(self.tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"))

@@ -23,6 +23,10 @@ on:
         description: Private read-only NOR diagnosis; requires rf_test, keeps its Wi-Fi EEPROM
         type: boolean
         default: false
+      compare_run:
+        description: Optional baseline run ID for compile-time comparison (queue time excluded)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -35,6 +39,9 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
     defaults:
       run:
         shell: bash
@@ -253,6 +260,7 @@ jobs:
           {
             echo '### SL-3000 eMMC'
             echo 'OpenWrt 25.12.5, pinned feeds and proxy components.'
+            echo 'Ruby/YAML retained; optional Ruby YJIT disabled; no Rust host toolchain built.'
             echo 'Image checks passed. Hardware acceptance is still required.'
             echo 'Only sysupgrade/initramfs and verification records are exported. No BL2/FIP/GPT.'
             echo 'The setup Wi-Fi password is extractable from the image. Change it on first login.'
@@ -267,6 +275,17 @@ jobs:
               echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compare compile time with baseline
+        if: ${{ inputs.compare_run != '' && !cancelled() && steps.compile.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN: ${{ inputs.compare_run }}
+        run: |
+          python3 "$RECIPE/ci_compare.py" --baseline-run "$BASELINE_RUN" \
+            --current-run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY"
 
   release:
     if: ${{ inputs.publish_release && !inputs.rf_test }}

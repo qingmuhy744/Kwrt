@@ -17,7 +17,7 @@ BOARD = "sl,3000-emmc"
 PROFILE = "sl_3000-emmc"
 REQUIRED_PACKAGES = (
     "luci", "luci-ssl", "dnsmasq-full", "firewall4", "tailscale",
-    "luci-app-tailscale-community", "luci-app-passwall", "luci-app-openclash",
+    "luci-app-tailscale-community", "luci-app-passwall", "luci-app-openclash", "ruby", "ruby-yaml",
     "mihomo", "xray-core", "sing-box", "chinadns-ng", "dns2socks", "ipt2socks",
     "kmod-nft-socket", "kmod-nft-tproxy", "kmod-nft-nat", "kmod-tun",
     "luci-app-upnp", "miniupnpd-nftables", "luci-app-wol", "etherwake",
@@ -39,6 +39,8 @@ def validate_config(text):
     missing = [key for key in required if settings.get(key) != "y"]
     if missing:
         raise ValueError("Required built-ins missing: " + ", ".join(missing))
+    if settings.get("CONFIG_RUBY_ENABLE_YJIT") in ("y", "m"):
+        raise ValueError("Ruby YJIT must stay disabled to avoid its Rust/LLVM build dependency")
     forbidden = ["CONFIG_TARGET_ALL_PROFILES", "CONFIG_TARGET_MULTI_PROFILE", "CONFIG_ALL_KMODS",
                  "CONFIG_PACKAGE_dnsmasq", "CONFIG_PACKAGE_miniupnpd-iptables",
                  "CONFIG_PACKAGE_luci-app-attendedsysupgrade", "CONFIG_PACKAGE_owut"]
@@ -146,6 +148,11 @@ def artifacts(tree, destination):
     validate_password(password)
     config = (tree / ".config").read_text()
     validate_config(config)
+    # The pinned Rust package installs into the target-specific host directory.
+    rust_compilers = [tree / "staging_dir/host/bin/rustc", tree / "staging_dir/hostpkg/bin/rustc",
+                      *tree.glob("staging_dir/target-*/host/bin/rustc")]
+    if any(path.exists() or path.is_symlink() for path in rust_compilers):
+        raise ValueError("Unexpected Rust host toolchain; check the resolved build dependencies")
     target = tree / "bin/targets/mediatek/filogic"
     sysupgrade = one(target.glob(f"*-{PROFILE}-squashfs-sysupgrade.bin"), "sysupgrade")
     initramfs = one(target.glob(f"*-{PROFILE}-initramfs.itb"), "initramfs")
