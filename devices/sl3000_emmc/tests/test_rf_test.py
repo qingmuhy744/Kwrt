@@ -28,6 +28,7 @@ def private_env(data=None):
     data = fixture() if data is None else data
     return {
         "SL3000_RF_TEST": "true",
+        "SL3000_NOR_PROBE": "false",
         rf_test.CALIBRATION_ENV: json.dumps({
             "eeprom_base64": base64.b64encode(data).decode(),
             "sha256": hashlib.sha256(data).hexdigest(),

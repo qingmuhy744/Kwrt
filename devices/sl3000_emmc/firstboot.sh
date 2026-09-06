@@ -1,9 +1,14 @@
 #!/bin/sh
 # shellcheck shell=dash
 # OpenWrt supplies these libraries; callbacks are invoked by config_foreach.
-# shellcheck disable=SC1091,SC2317
+# shellcheck disable=SC1091,SC2317,SC2329
 
 [ "$(cat /tmp/sysinfo/board_name)" = "sl,3000-emmc" ] || exit 1
+# Preinit restores these archives before uci-defaults; S95done removes them later.
+if [ -f /sysupgrade.tgz ] || [ -f /tmp/sysupgrade.tar ]; then
+    logger -t sl3000-setup 'Preserved sysupgrade configuration; skipping setup defaults.'
+    exit 0
+fi
 . /lib/functions.sh
 . /lib/functions/system.sh
 
@@ -27,7 +32,9 @@ uci -q set passwall.@global[0].acl_enable='0'
 uci -q set openclash.config.enable='0'
 uci -q set upnpd.config.enabled='0'
 uci -q set upnpd.config.secure_mode='1'
-for service in passwall passwall_server openclash tailscale miniupnpd; do
+# ucitrack registers LuCI apply triggers only for enabled non-procd services.
+[ ! -x "/etc/init.d/passwall" ] || "/etc/init.d/passwall" enable
+for service in passwall_server openclash tailscale miniupnpd; do
     [ ! -x "/etc/init.d/$service" ] || "/etc/init.d/$service" disable
 done
 for config in network dhcp system luci passwall openclash upnpd; do

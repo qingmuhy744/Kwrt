@@ -24,6 +24,8 @@
 
 PassWall、OpenClash、Tailscale、UPnP 默认关闭。没有订阅、节点、账号、Tailscale 登录状态或 root 密码。两种透明代理一次只启用一个。
 
+PassWall 的系统服务保留启用，以便 LuCI 的“保存并应用”能够触发服务重载；代理主开关和访问控制仍默认关闭，不会自动接管网络。
+
 ## 初始网络
 
 - LAN：`192.168.21.1/24`，DHCP 开启，后台 `http://192.168.21.1`。
@@ -66,6 +68,28 @@ python3 devices/sl3000_emmc/rf_test.py capture \
   --reference /private/path/MT7981_iPAiLNA_EEPROM.bin \
   --output /private/path/new-rf-test-directory
 ```
+
+### 本机 NOR 只读诊断
+
+`nor_probe=true` 只能与 `rf_test=true` 一起使用，仍禁止 Release 和明文上传。它保留当前已验证有效的本机运行时 EEPROM，**不把 NOR 的 factory 数据接入 Wi-Fi**。
+
+- 参考 OpenWrt PR [24172](https://github.com/openwrt/openwrt/pull/24172) 的 SPI2 接线，新增 10 MHz、单线 SPI-NOR 识别。只暴露一个预期大小为 32 MiB、名为 `sl3000-nor-probe` 的只读原始分区，不预先认定 factory 的实际内容有效。
+- 不写 NOR 存储内容，不添加可写 U-Boot 环境分区。禁用分区主设备的额外暴露，内核选择 `CONFIG_MTD_SPI_NOR_SWP_KEEP=y`，避免探测时解除原有块写保护。SPI 初始化仍可能发送正常的易失性状态或寻址模式命令，“只读”不是不初始化控制器。
+- 源码、mt76 和无线 MCU 版本不变；设备树和上述 NOR 保护策略是本轮内核相关变化。eMMC 布局、升级写入范围、Wi-Fi 校准文件及其加载方式不变。
+- CI 验证 sysupgrade 和 initramfs FIT 中的实际设备树、NOR 只读标志、SPI 接线、内核保护选项，以及原有私有 EEPROM 的逐字节一致性。系统内 `/etc/sl3000-nor-probe.json` 标记诊断类型，不含校准内容。
+- Actions 选择 `rf_test=true`、`nor_probe=true`、`publish_release=false`、`public_setup_password=true`。产物名为 `sl3000-emmc-nor-probe-<run id>`；内部仍使用 `sl3000-rf-test.tar.gpg` 和现有私有解密口令。
+- 不自动采集或上传 NOR 内容。安装后再经 SSH 只读检查 JEDEC/SFDP、实际容量、候选校准区域及 MTD 写保护状态。此步骤不要求测速。
+
+#### 从当前本机实验固件保留配置升级
+
+仅适用于当前同一 OpenWrt 25.12.5 基线、同一设备和已有 GPT 布局；不能推广到旧厂商固件或跨大版本迁移。
+
+1. 在 LuCI 的“系统 → 备份/升级”先下载配置备份，保存在本机；备份包含私人配置，不上传到公开仓库。确认重要的自定义文件在备份列表内，额外安装的软件不会因“保留配置”自动重新安装。
+2. 上传解密后的 `*-sl_3000-emmc-squashfs-sysupgrade.bin`，勾选“保留配置”。不要选择 `initramfs.itb`，也不要用 U-Boot 刷写来替代这条保留配置的升级路径。
+3. 如果兼容性或分区检查失败，停止升级，不使用强制选项。升级前保留现在正常镜像的离线副本，并准备有线管理方式。
+4. 本版本在检测到 OpenWrt 正在恢复 sysupgrade 配置时，跳过本项目全部首启默认值，不重置 Wi-Fi、LAN、DNS、PassWall/OpenClash 开关或系统设置。全新安装仍应用公开临时 Wi-Fi 等默认值。
+
+“NOR 只读”只约束诊断对象；sysupgrade 仍会更新 eMMC 上的系统。保留配置和离线备份都需要，不能把实验升级视为零风险。
 
 ### 缓存与编译并发
 

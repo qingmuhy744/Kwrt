@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 import verify
 import rf_test
+import nor_probe
 from test_rf_test import fixture, private_env
 
 IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
@@ -139,6 +140,28 @@ inspect:
             self.collect(rootfs_error=ValueError("Invalid rootfs fixture"))
         self.assertFalse(self.output.exists())
 
+    def test_nor_profile_checks_both_fit_payloads_before_export(self):
+        from test_nor_probe import kernel_config, probe_env
+        config = next(self.tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"))
+        config.write_text(config.read_text() + kernel_config())
+        with patch.dict(os.environ, probe_env()), \
+                patch.object(nor_probe, "validate_fit") as inspect:
+            self.collect()
+            self.assertEqual(inspect.call_count, 2)
+            self.assertEqual(inspect.call_args_list[0].args[0].name, "kernel.fit")
+            self.assertEqual(inspect.call_args_list[1].args[0], self.initramfs)
+        info = json.loads((self.output / "build-info.json").read_text())
+        self.assertEqual(info["nor_profile"], "read-only-probe")
+        self.assertEqual(info["wifi_profile"], "private-runtime-eeprom-ab-test")
+
+    def test_invalid_nor_fit_prevents_export(self):
+        from test_nor_probe import probe_env
+        with patch.dict(os.environ, probe_env()), \
+                patch.object(nor_probe, "validate_fit", side_effect=ValueError("unsafe NOR fixture")):
+            with self.assertRaisesRegex(ValueError, "unsafe NOR fixture"):
+                self.collect()
+        self.assertFalse(self.output.exists())
+
 
 class RootfsRFTests(unittest.TestCase):
     def test_private_rootfs_requires_exact_eeprom_and_marker(self):
@@ -171,6 +194,13 @@ class RootfsRFTests(unittest.TestCase):
                 files[rf_test.FIRMWARE_PATH] = fixture()
                 files[rf_test.MARKER_PATH] = b"wrong marker"
                 with self.assertRaisesRegex(ValueError, "marker missing or changed"):
+                    verify.verify_rootfs(image, scratch, PASSWORD)
+                files[rf_test.MARKER_PATH] = rf_test.marker(fixture())
+                with patch.dict(os.environ, {"SL3000_NOR_PROBE": "true"}):
+                    files[nor_probe.MARKER_PATH] = b"wrong NOR marker"
+                    with self.assertRaisesRegex(ValueError, "NOR probe marker"):
+                        verify.verify_rootfs(image, scratch, PASSWORD)
+                    files[nor_probe.MARKER_PATH] = nor_probe.marker()
                     verify.verify_rootfs(image, scratch, PASSWORD)
 
     def test_private_secret_cannot_be_omitted_to_use_generic_eeprom(self):

@@ -69,6 +69,8 @@ def prepare(tree):
         raise ValueError("Source tree already prepared; use a fresh checkout")
     image.write_text(image.read_text() + (HERE / "image.mk").read_text())
     shutil.copy2(HERE / "files/mt7981b-sl-3000-emmc.dts", tree / "target/linux/mediatek/dts/")
+    import nor_probe
+    nor_probe.prepare(tree)
     base = tree / "target/linux/mediatek/filogic/base-files"
     shutil.copy2(HERE / "files/03_sl3000-network", base / "etc/board.d/")
     (base / "etc/board.d/03_sl3000-network").chmod(0o755)

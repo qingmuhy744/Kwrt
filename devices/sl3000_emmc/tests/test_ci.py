@@ -154,6 +154,60 @@ sl3000_check_image "$2"
 
 @unittest.skipUnless((ROOT / "inject_defaults.py").exists(), "implementation pending")
 class DefaultsTests(unittest.TestCase):
+    def test_preserved_upgrade_skips_all_setup_defaults(self):
+        script = (ROOT / "firstboot.sh").read_text()
+        # Exercise the guard before any library, UCI or service side effects.
+        prefix = script.split('. /lib/functions.sh', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            board = root / "board_name"
+            board.write_text("sl,3000-emmc\n")
+            prefix = prefix.replace("/tmp/sysinfo/board_name", str(board))
+            prefix = prefix.replace("/sysupgrade.tgz", str(root / "sysupgrade.tgz"))
+            prefix = prefix.replace("/tmp/sysupgrade.tar", str(root / "sysupgrade.tar"))
+            harness = 'logger() { :; }\n' + prefix + '\nprintf "defaults-would-run\\n"\n'
+            for backup_name in ("sysupgrade.tgz", "sysupgrade.tar"):
+                with self.subTest(backup=backup_name):
+                    backup = root / backup_name
+                    backup.write_bytes(b"restored configuration")
+                    result = subprocess.run(["sh", "-c", harness], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertEqual(backup.read_bytes(), b"restored configuration")
+                    backup.unlink()
+            result = subprocess.run(["sh", "-c", harness], capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout, "defaults-would-run\n")
+
+    def test_passwall_service_is_enabled_without_enabling_proxy(self):
+        script = (ROOT / "firstboot.sh").read_text()
+        defaults = script[script.index("# These packages"):script.index("# Mainline mt76")]
+        services = ("passwall", "passwall_server", "openclash", "tailscale", "miniupnpd")
+        with tempfile.TemporaryDirectory() as directory:
+            init = Path(directory) / "init.d"
+            init.mkdir()
+            for service in services:
+                stub = init / service
+                stub.write_text('#!/bin/sh\nprintf "service:%s:%s\\n" "${0##*/}" "$1"\n')
+                stub.chmod(0o700)
+            # Execute the real service-default stanza with harmless UCI/init stubs.
+            harness = 'uci() { printf "uci:%s\\n" "$*"; }\n'
+            harness += defaults.replace("/etc/init.d/", f"{init}/")
+            result = subprocess.run(
+                ["sh", "-c", harness], capture_output=True, text=True, check=True,
+            )
+        actions = result.stdout.splitlines()
+        self.assertEqual(
+            [action for action in actions if action.startswith("service:passwall:")],
+            ["service:passwall:enable"],
+        )
+        for option in ("enabled", "acl_enable"):
+            self.assertIn(f"uci:-q set passwall.@global[0].{option}=0", actions)
+        for service in services[1:]:
+            self.assertEqual(
+                [action for action in actions if action.startswith(f"service:{service}:")],
+                [f"service:{service}:disable"],
+            )
+
     def test_injects_only_the_rootfs_script(self):
         from inject_defaults import inject
         password = "temporary-test-password"

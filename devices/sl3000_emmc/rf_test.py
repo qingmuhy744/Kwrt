@@ -65,6 +65,8 @@ def passphrase():
 
 
 def preflight(publish_release):
+    import nor_probe
+    nor_probe.require_private()
     if enabled():
         if publish_release:
             raise ValueError("Device-specific RF test images must not be published")

@@ -19,6 +19,10 @@ on:
         description: Private same-router runtime EEPROM A/B test; encrypted artifact only
         type: boolean
         default: false
+      nor_probe:
+        description: Private read-only NOR diagnosis; requires rf_test, keeps its Wi-Fi EEPROM
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -43,13 +47,14 @@ jobs:
       CCACHE_COMPILERCHECK: content
       CCACHE_MAXSIZE: 2GiB
       SL3000_RF_TEST: ${{ inputs.rf_test && 'true' || 'false' }}
+      SL3000_NOR_PROBE: ${{ inputs.nor_probe && 'true' || 'false' }}
     steps:
       - name: Checkout recipe
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
-      - name: Preflight and unit tests
+      - name: Preflight inputs
         env:
           DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
@@ -62,7 +67,6 @@ jobs:
             echo 'Public images expose their Wi-Fi password. Confirm use of a public temporary password.'
             exit 1
           fi
-          python3 -m unittest discover -s "$RECIPE/tests" -v
           python3 "$RECIPE/rf_test.py" preflight --publish-release "$PUBLISH_RELEASE"
           PYTHONPATH="$RECIPE" python3 -c 'import os; from inject_defaults import validate_password; validate_password(os.environ.get("DEFAULT_WIFI_PASSWORD", ""))'
 
@@ -73,13 +77,19 @@ jobs:
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             python3-pyelftools rsync swig unzip zlib1g-dev file wget zstd \
             libelf-dev libtool autoconf automake cmake ninja-build pkgconf \
-            ccache curl jq patch perl time squashfs-tools gnupg
+            ccache curl jq patch perl time squashfs-tools gnupg device-tree-compiler
           df -h .
+
+      - name: Unit tests including compiled device trees
+        env:
+          SL3000_RF_TEST: 'false'
+          SL3000_NOR_PROBE: 'false'
+        run: python3 -m unittest discover -s "$RECIPE/tests" -v
 
       - name: Compute independent cache keys
         id: cache_keys
         env:
-          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**') }}
+          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**') }}
         run: |
           namespace="sl3000-v2-ubuntu-24.04-${RUNNER_OS}-${RUNNER_ARCH}"
           download_prefix="${namespace}-dl-${RECIPE_HASH}-"
@@ -232,7 +242,7 @@ jobs:
         if: ${{ inputs.rf_test }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sl3000-emmc-rf-test-${{ github.run_id }}
+          name: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe' || 'rf-test' }}-${{ github.run_id }}
           path: ${{ runner.temp }}/sl3000-encrypted/*
           if-no-files-found: error
           compression-level: 0
@@ -247,9 +257,14 @@ jobs:
             echo 'Only sysupgrade/initramfs and verification records are exported. No BL2/FIP/GPT.'
             echo 'The setup Wi-Fi password is extractable from the image. Change it on first login.'
             if [[ "$SL3000_RF_TEST" == true ]]; then
-              echo 'PRIVATE RF A/B TEST: captured runtime EEPROM, unchanged pinned kernel/mt76/MCU.'
+              echo 'PRIVATE RF PROFILE: captured runtime EEPROM, pinned mt76/MCU versions.'
               echo 'Only an AES-256 encrypted archive is uploaded. The decryption key is held locally.'
               echo 'Use only on the source router. Do not redistribute the decrypted images.'
+            fi
+            if [[ "$SL3000_NOR_PROBE" == true ]]; then
+              echo 'NOR DIAGNOSTIC: one read-only raw partition; hardware write protection retained.'
+              echo 'No factory-to-Wi-Fi NVMEM binding. Current runtime EEPROM is retained.'
+              echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

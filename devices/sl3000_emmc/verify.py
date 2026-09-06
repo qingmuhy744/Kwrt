@@ -127,6 +127,10 @@ def verify_rootfs(image, scratch, password):
             raise ValueError("Private RF test marker missing or changed")
     elif hashlib.sha256(eeprom).hexdigest() != lock["mt76_eeprom"]["sha256"]:
         raise ValueError("Default EEPROM missing or changed")
+    import nor_probe
+    nor_probe.require_private()
+    if nor_probe.enabled() and root_file(root, nor_probe.MARKER_PATH) != nor_probe.marker():
+        raise ValueError("NOR probe marker missing or changed")
     shadow = root_file(root, "etc/shadow").decode()
     root_password = next(line.split(":")[1] for line in shadow.splitlines() if line.startswith("root:"))
     if root_password not in ("", "*", "!"):
@@ -159,9 +163,19 @@ def artifacts(tree, destination):
         metadata = json.loads(metadata_file.read_text())
         validate_metadata(metadata)
         verify_rootfs(sysupgrade, scratch, password)
+        import nor_probe
+        nor_probe.require_private()
+        if nor_probe.enabled():
+            kernel = scratch / "kernel.fit"
+            with tarfile.open(sysupgrade) as archive, kernel.open("wb") as stream:
+                shutil.copyfileobj(archive.extractfile(f"sysupgrade-{PROFILE}/kernel"), stream)
+            nor_probe.validate_fit(kernel, scratch)
+            nor_probe.validate_fit(initramfs, scratch)
     kernel_config = one(tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"), "6.12 kernel config")
     if not all(f"{symbol}=y" in kernel_config.read_text() for symbol in ("CONFIG_MMC", "CONFIG_MMC_BLOCK", "CONFIG_MMC_MTK")):
         raise ValueError("Kernel lacks built-in eMMC support")
+    if nor_probe.enabled():
+        nor_probe.validate_kernel(kernel_config.read_text())
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("Release directory must be empty")
     destination.mkdir(parents=True, exist_ok=True)
@@ -185,6 +199,7 @@ def artifacts(tree, destination):
     }
     from rf_test import enabled
     provenance["wifi_profile"] = "private-runtime-eeprom-ab-test" if enabled() else "generic-bootstrap"
+    provenance["nor_profile"] = "read-only-probe" if nor_probe.enabled() else "disabled"
     (destination / "build-info.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (destination / "sha256sums").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in sorted(destination.iterdir())))
     print("Validated SL-3000 images, packages, defaults and allowlisted artifacts. Hardware validation still required.")
