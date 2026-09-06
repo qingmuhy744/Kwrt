@@ -58,16 +58,21 @@ def prepare(tree):
         raise ValueError("NOR probe already prepared")
     shutil.copy2(HERE / "files" / FRAGMENT, dts_directory / FRAGMENT)
     dts.write_text(dts.read_text() + f'\n#include "{FRAGMENT}"\n')
-    config = tree / "target/linux/mediatek/filogic/config-6.12"
-    lines = [line for line in config.read_text().splitlines()
-             if not any(line.startswith(symbol + "=") or line == f"# {symbol} is not set"
-                        for symbol in KERNEL_POLICY)]
-    lines += [f"{symbol}=y" if value == "y" else f"# {symbol} is not set"
-              for symbol, value in KERNEL_POLICY.items()]
-    config.write_text("\n".join(lines) + "\n")
+    configure_kernel(tree)
     path = tree / "files" / MARKER_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(marker())
+
+
+def configure_kernel(tree, extra=None):
+    policy = {**KERNEL_POLICY, **(extra or {})}
+    config = tree / "target/linux/mediatek/filogic/config-6.12"
+    lines = [line for line in config.read_text().splitlines()
+             if not any(line.startswith(symbol + "=") or line == f"# {symbol} is not set"
+                        for symbol in policy)]
+    lines += [f"{symbol}=y" if value == "y" else f"# {symbol} is not set"
+              for symbol, value in policy.items()]
+    config.write_text("\n".join(lines) + "\n")
 
 
 def validate_kernel(text):
@@ -123,7 +128,7 @@ def validate_dtb(path):
         raise ValueError("NOR probe SPI pins are not connected")
 
 
-def validate_fit(path, scratch):
+def validate_fit(path, scratch, validator=validate_dtb):
     configs = fdt_get(path, "/configurations", listing="l").split()
     if not configs or fdt_get(path, "/configurations", "default") not in configs:
         raise ValueError("NOR probe FIT has no valid default configuration")
@@ -134,4 +139,4 @@ def validate_fit(path, scratch):
             raise ValueError("NOR probe requires an inspectable uncompressed FIT device tree")
         dtb = scratch / f"nor-probe-{index}.dtb"
         dtb.write_bytes(bytes(int(word, 16) for word in fdt_get(path, node, "data", "bx").split()))
-        validate_dtb(dtb)
+        validator(dtb)

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 import verify
 import rf_test
 import nor_probe
+import factory_test
 from test_rf_test import fixture, private_env
 
 IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
@@ -172,6 +173,38 @@ inspect:
             with self.assertRaisesRegex(ValueError, "unsafe NOR fixture"):
                 self.collect()
         self.assertFalse(self.output.exists())
+
+    def test_public_factory_profile_checks_both_dts_and_initramfs_contents(self):
+        from test_factory_test import kernel_config, public_env
+        config = next(self.tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"))
+        config.write_text(config.read_text() + kernel_config())
+        with patch.dict(os.environ, public_env()), \
+                patch.object(factory_test, "validate_fit") as inspect, \
+                patch.object(factory_test, "validate_initramfs") as initramfs:
+            self.collect()
+            self.assertEqual(inspect.call_count, 2)
+            self.assertEqual(inspect.call_args_list[0].args[0].name, "kernel.fit")
+            self.assertEqual(inspect.call_args_list[1].args[0], self.initramfs)
+            initramfs.assert_called_once()
+            self.assertEqual(initramfs.call_args.args[0], self.initramfs)
+        info = json.loads((self.output / "build-info.json").read_text())
+        self.assertEqual(info["wifi_profile"], "public-factory-eeprom-test")
+        self.assertEqual(info["nor_profile"], "read-only-factory-nvmem")
+        self.assertEqual(info["eeprom_fallback"], "pinned-public-generic")
+        self.assertFalse(info["contains_private_calibration"])
+        self.assertFalse(info["hardware_validated"])
+
+    def test_public_factory_invalid_dts_or_private_initramfs_prevents_export(self):
+        from test_factory_test import public_env
+        for failing in ("validate_fit", "validate_initramfs"):
+            with self.subTest(failing=failing), patch.dict(os.environ, public_env()), \
+                    patch.object(factory_test, "validate_fit") as inspect, \
+                    patch.object(factory_test, "validate_initramfs") as initramfs:
+                check = inspect if failing == "validate_fit" else initramfs
+                check.side_effect = ValueError("unsafe public image fixture")
+                with self.assertRaisesRegex(ValueError, "unsafe public image fixture"):
+                    self.collect()
+                self.assertFalse(self.output.exists())
 
 
 class RootfsRFTests(unittest.TestCase):

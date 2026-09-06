@@ -23,6 +23,10 @@ on:
         description: Private read-only NOR diagnosis; requires rf_test, keeps its Wi-Fi EEPROM
         type: boolean
         default: false
+      factory_test:
+        description: Public test; per-device read-only Factory with public generic EEPROM fallback
+        type: boolean
+        default: false
       compare_run:
         description: Optional baseline run ID for compile-time comparison (queue time excluded)
         type: string
@@ -55,6 +59,7 @@ jobs:
       CCACHE_MAXSIZE: 2GiB
       SL3000_RF_TEST: ${{ inputs.rf_test && 'true' || 'false' }}
       SL3000_NOR_PROBE: ${{ inputs.nor_probe && 'true' || 'false' }}
+      SL3000_FACTORY_TEST: ${{ inputs.factory_test && 'true' || 'false' }}
     steps:
       - name: Checkout recipe
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -67,8 +72,8 @@ jobs:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           PUBLIC_SETUP_PASSWORD: ${{ inputs.public_setup_password }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
-          SL3000_RF_TEST_CALIBRATION: ${{ secrets.SL3000_RF_TEST_CALIBRATION }}
-          SL3000_RF_TEST_PASSPHRASE: ${{ secrets.SL3000_RF_TEST_PASSPHRASE }}
+          SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
+          SL3000_RF_TEST_PASSPHRASE: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_PASSPHRASE || '' }}
         run: |
           if [[ "$REPOSITORY_PRIVATE" != true && "$PUBLIC_SETUP_PASSWORD" != true ]]; then
             echo 'Public images expose their Wi-Fi password. Confirm use of a public temporary password.'
@@ -84,23 +89,26 @@ jobs:
             gettext git libncurses-dev libssl-dev python3 python3-setuptools \
             python3-pyelftools rsync swig unzip zlib1g-dev file wget zstd \
             libelf-dev libtool autoconf automake cmake ninja-build pkgconf \
-            ccache curl jq patch perl time squashfs-tools gnupg device-tree-compiler
+            ccache curl jq patch perl time squashfs-tools gnupg device-tree-compiler \
+            u-boot-tools libarchive-tools
           df -h .
 
       - name: Unit tests including compiled device trees
         env:
           SL3000_RF_TEST: 'false'
           SL3000_NOR_PROBE: 'false'
+          SL3000_FACTORY_TEST: 'false'
         run: python3 -m unittest discover -s "$RECIPE/tests" -v
 
       - name: Compute independent cache keys
         id: cache_keys
         env:
-          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**') }}
+          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/factory_test.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**') }}
+          BUILD_PROFILE: ${{ inputs.factory_test && 'factory-test' || inputs.nor_probe && 'nor-probe' || inputs.rf_test && 'rf-test' || 'generic' }}
         run: |
           namespace="sl3000-v2-ubuntu-24.04-${RUNNER_OS}-${RUNNER_ARCH}"
           download_prefix="${namespace}-dl-${RECIPE_HASH}-"
-          compiler_prefix="${namespace}-ccache-${RECIPE_HASH}-"
+          compiler_prefix="${namespace}-ccache-${BUILD_PROFILE}-${RECIPE_HASH}-"
           {
             echo "download_prefix=$download_prefix"
             echo "download_fallback=${namespace}-dl-"
@@ -149,7 +157,7 @@ jobs:
       - name: Inject private runtime EEPROM for the same-router RF test
         if: ${{ inputs.rf_test }}
         env:
-          SL3000_RF_TEST_CALIBRATION: ${{ secrets.SL3000_RF_TEST_CALIBRATION }}
+          SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
         run: python3 "$RECIPE/rf_test.py" inject "$OPENWRT"
 
       - name: Download verified package sources
@@ -223,7 +231,7 @@ jobs:
       - name: Verify and collect only approved outputs
         env:
           DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
-          SL3000_RF_TEST_CALIBRATION: ${{ secrets.SL3000_RF_TEST_CALIBRATION }}
+          SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
         run: |
           python3 "$RECIPE/verify.py" artifacts "$OPENWRT" --output "$RUNNER_TEMP/sl3000-release"
           cd "$RUNNER_TEMP/sl3000-release"
@@ -233,7 +241,7 @@ jobs:
         if: ${{ !inputs.rf_test }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sl3000-emmc-${{ github.run_id }}
+          name: sl3000-emmc-${{ inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}
           path: ${{ runner.temp }}/sl3000-release/*
           if-no-files-found: error
           compression-level: 0
@@ -274,6 +282,13 @@ jobs:
               echo 'No factory-to-Wi-Fi NVMEM binding. Current runtime EEPROM is retained.'
               echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
             fi
+            if [[ "$SL3000_FACTORY_TEST" == true ]]; then
+              echo 'PUBLIC FACTORY TEST: read-only Factory NVMEM at 0x180000, EEPROM size 4096 bytes.'
+              echo 'Unmodified mt76 retains the pinned public generic EEPROM fallback; coverage may be poor on fallback.'
+              echo 'No private calibration input or encryption. Both images checked for the public EEPROM and profile.'
+              echo 'Artifact only, no Release. Matching hardware/layout requires post-flash validation.'
+              echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compare compile time with baseline
@@ -288,7 +303,7 @@ jobs:
             --current-run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY"
 
   release:
-    if: ${{ inputs.publish_release && !inputs.rf_test }}
+    if: ${{ inputs.publish_release && !inputs.rf_test && !inputs.factory_test }}
     needs: build
     runs-on: ubuntu-24.04
     permissions:

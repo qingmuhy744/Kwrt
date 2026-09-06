@@ -28,6 +28,8 @@ REQUIRED_PACKAGES = (
 
 
 def validate_config(text):
+    import factory_test
+    factory_test.preflight()
     settings = dict(line.split("=", 1) for line in text.splitlines() if line.startswith("CONFIG_") and "=" in line)
     devices = [key for key, value in settings.items() if key.startswith("CONFIG_TARGET_") and "_DEVICE_" in key and value == "y"]
     if devices != [f"CONFIG_TARGET_mediatek_filogic_DEVICE_{PROFILE}"]:
@@ -140,6 +142,11 @@ def verify_rootfs(image, scratch, password):
     listing = subprocess.check_output(["unsquashfs", "-ll", str(root)], text=True)
     if re.search(r"(?:tailscaled\.state|id_rsa|id_ed25519|authorized_keys|dropbear_\w+_host_key)(?:\s|$)", listing):
         raise ValueError("Firmware contains account or host identity state")
+    import factory_test
+    if factory_test.enabled():
+        names = subprocess.check_output(["unsquashfs", "-l", str(root)], text=True).splitlines()
+        names = {name.removeprefix("squashfs-root/") for name in names}
+        factory_test.validate_files(lambda name: root_file(root, name), names)
 
 
 def artifacts(tree, destination):
@@ -171,18 +178,24 @@ def artifacts(tree, destination):
         validate_metadata(metadata)
         verify_rootfs(sysupgrade, scratch, password)
         import nor_probe
+        import factory_test
         nor_probe.require_private()
-        if nor_probe.enabled():
+        if nor_probe.enabled() or factory_test.enabled():
             kernel = scratch / "kernel.fit"
             with tarfile.open(sysupgrade) as archive, kernel.open("wb") as stream:
                 shutil.copyfileobj(archive.extractfile(f"sysupgrade-{PROFILE}/kernel"), stream)
-            nor_probe.validate_fit(kernel, scratch)
-            nor_probe.validate_fit(initramfs, scratch)
+            profile = factory_test if factory_test.enabled() else nor_probe
+            profile.validate_fit(kernel, scratch)
+            profile.validate_fit(initramfs, scratch)
+        if factory_test.enabled():
+            factory_test.validate_initramfs(initramfs, scratch)
     kernel_config = one(tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"), "6.12 kernel config")
     if not all(f"{symbol}=y" in kernel_config.read_text() for symbol in ("CONFIG_MMC", "CONFIG_MMC_BLOCK", "CONFIG_MMC_MTK")):
         raise ValueError("Kernel lacks built-in eMMC support")
     if nor_probe.enabled():
         nor_probe.validate_kernel(kernel_config.read_text())
+    if factory_test.enabled():
+        factory_test.validate_kernel(kernel_config.read_text())
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("Release directory must be empty")
     destination.mkdir(parents=True, exist_ok=True)
@@ -207,6 +220,14 @@ def artifacts(tree, destination):
     from rf_test import enabled
     provenance["wifi_profile"] = "private-runtime-eeprom-ab-test" if enabled() else "generic-bootstrap"
     provenance["nor_profile"] = "read-only-probe" if nor_probe.enabled() else "disabled"
+    if factory_test.enabled():
+        provenance.update({
+            "status": "public-test-artifact",
+            "wifi_profile": "public-factory-eeprom-test",
+            "nor_profile": "read-only-factory-nvmem",
+            "eeprom_fallback": "pinned-public-generic",
+            "contains_private_calibration": False,
+        })
     (destination / "build-info.json").write_text(json.dumps(provenance, indent=2) + "\n")
     (destination / "sha256sums").write_text("".join(f"{sha256(path)}  {path.name}\n" for path in sorted(destination.iterdir())))
     print("Validated SL-3000 images, packages, defaults and allowlisted artifacts. Hardware validation still required.")

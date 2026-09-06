@@ -14,6 +14,8 @@
 
 2026-09-05 首次只读检查发现：设备 GPT 没有 `factory`，当时的 vendor Wi-Fi 驱动报告 EEPROM 无效并使用默认文件。默认构建移除不存在的 NVMEM 引用，包含与锁定 mt76 源码配套的通用 EEPROM。它**不能恢复每台设备的原厂射频校准**。后续实测该默认构建存在 Wi-Fi 覆盖和吞吐问题；不能当作已修复版本使用。以太网和 AP MAC 从设备 eMMC CID 派生，避免所有机器共享默认 EEPROM 的 MAC；升级后 MAC 可能与旧固件不同。
 
+2026-09-06 对正常运行的同一设备完成 NOR 只读诊断：独立的 32 MiB SPI-NOR 内存在 Factory，位置为 `0x180000`、长度 `0x200000`，其前 4096 字节是本机 EEPROM；驻留旧固件设备树也确认了该布局。新增的 `factory_test` 公共测试模式读取这个区域，不再把该设备的运行时 EEPROM 放进镜像。此发现仅验证了样本设备的布局和数据，尚不能代表所有同名机型已通过实机验收。
+
 ## 内置内容
 
 - Tailscale 与官方 feed 的 `luci-app-tailscale-community`。
@@ -44,9 +46,25 @@ PassWall 的系统服务保留启用，以便 LuCI 的“保存并应用”能�
 4. `publish_release` 默认关闭；启用后也只创建 prerelease，不能表示硬件验收通过。
 5. 下载 `sl3000-emmc-<run id>`，解压后用 `sha256sum -c sha256sums`（macOS 可用 `shasum -a 256 -c sha256sums`）验证。
 
+上述不选测试模式的构建仍是旧的通用 EEPROM bootstrap。要测试本机 Factory 读取，请按下面的公共测试选项触发，避免误下载旧模式。
+
 产物只包括设备 sysupgrade、initramfs FIT、包清单、OpenWrt/kernel 配置、来源锁定清单、构建信息和 SHA-256。不会上传完整构建目录、注入密码的脚本或未筛选的 `bin/targets` 目录。失败构建不发布镜像。
 
 所有来源见 `sources.lock.json`，官方 feeds 与 25.12.5 发布的 `feeds.buildinfo` 一致。第三方插件也按 commit 固定；Mihomo 使用上游发布的压缩二进制并验证 SHA-256。升级这些来源需要显式修改锁文件及相应包配方后重跑验证。固定源码不代表比特级可重复，也不能替代安全更新。
+
+### 公共 Factory 校准测试
+
+此模式只面向匹配上述 eMMC GPT、SPI2 接线、32 MiB NOR / Factory 布局的 SL-3000，首轮样本为 MT7981 / MT7976C A-die v1。它不是所有 SL-3000 硬件修订的稳定通刷版。
+
+- 开启 `factory_test=true`，关闭 `rf_test`、`nor_probe`、`publish_release`，确认 `public_setup_password=true`；`clean_build=false` 保留下载缓存复用。模式互斥和禁止 Release 由预检强制执行。
+- 每台路由器启动时从自己的 NOR Factory 前 4096 字节读取 EEPROM，通过标准 NVMEM `eeprom` 单元交给 mt76。仓库和产物中不包含样本设备的 NOR、EEPROM、MAC 或其他私人校准数据；公共构建步骤不接收私人校准或加密 Secret。
+- 按用户选择保留原版 mt76 的加载逻辑及配套的**公开通用 EEPROM 兜底文件**。正常顺序是设备树提供的 Factory 数据、驱动原有 eFuse 尝试、在适用错误条件下回退到通用文件；未改驱动来保证所有硬件故障都能启动。触发通用文件回退时，日志会出现 `eeprom load fail, use default bin`，覆盖效果可能退回此前信号较差的状态。
+- 不更换锁定的内核、mt76 或 MCU 版本，不修改射频算法、功率表、信道、国家码、以太网和 AP 的 MAC 派生策略。Factory 内容与私有运行时 EEPROM 并非逐字节相同，需要实机确认双频连接和覆盖；不要求测速。
+- 只暴露 `factory` 这一个只读 MTD 分区，不暴露整个 NOR 或可写引导环境。禁用额外分区主设备，保留 `CONFIG_MTD_SPI_NOR_SWP_KEEP=y`。这是 Linux 分区访问限制和保留原保护状态的策略，不是修改芯片永久锁，也不限制 eMMC 上保存配置或正常系统升级。
+- CI 检查 sysupgrade 与 initramfs 的实际设备树、Factory 范围、只读标志、EEPROM 单元大小和连接，以及内核 NVMEM / NOR 选项；分别检查两种镜像内的兜底文件与公开锁定 SHA-256 一致，拒绝私有测试标记。
+- 下载 `sl3000-emmc-factory-test-<run id>`，普通解压即可，**没有 GPG 密码**。仍校验包内 `sha256sums`。`build-info.json` 的 `wifi_profile` 为 `public-factory-eeprom-test`，`nor_profile` 为 `read-only-factory-nvmem`；系统内的 `/etc/sl3000-factory-test.json` 只标记设计意图，不是运行时成功证明。
+- 当前同一 25.12.5 基线可按下文用 LuCI 的 sysupgrade 镜像保留配置升级，提前保存离线备份和正常固件，准备有线管理。不要刷 GPT / BL2 / FIP，不需要重新刷 U-Boot。CI 不自动刷机，不创建 Release。
+- 刷后先只读检查 `factory` 分区标志、内核日志，再在本地比对 mt76 debugfs 的运行时 EEPROM 与本机 Factory 前 4096 字节及 ROM 中公开兜底文件，确定实际加载来源。不要只凭信号变好或没有回退日志就认定成功，不把原始校准内容上传到公开仓库。再检查双频连接和原先弱信号位置；至少需要另一台匹配设备的反馈后，才考虑扩大支持范围。
 
 ### 本机射频数据 A/B 测试
 
@@ -86,7 +104,7 @@ python3 devices/sl3000_emmc/rf_test.py capture \
 仅适用于当前同一 OpenWrt 25.12.5 基线、同一设备和已有 GPT 布局；不能推广到旧厂商固件或跨大版本迁移。
 
 1. 在 LuCI 的“系统 → 备份/升级”先下载配置备份，保存在本机；备份包含私人配置，不上传到公开仓库。确认重要的自定义文件在备份列表内，额外安装的软件不会因“保留配置”自动重新安装。
-2. 上传解密后的 `*-sl_3000-emmc-squashfs-sysupgrade.bin`，勾选“保留配置”。不要选择 `initramfs.itb`，也不要用 U-Boot 刷写来替代这条保留配置的升级路径。
+2. 上传对应模式的 `*-sl_3000-emmc-squashfs-sysupgrade.bin`，勾选“保留配置”；私有模式需先解密，公共 Factory 测试版直接解压。不要选择 `initramfs.itb`，也不要用 U-Boot 刷写来替代这条保留配置的升级路径。
 3. 如果兼容性或分区检查失败，停止升级，不使用强制选项。升级前保留现在正常镜像的离线副本，并准备有线管理方式。
 4. 本版本在检测到 OpenWrt 正在恢复 sysupgrade 配置时，跳过本项目全部首启默认值，不重置 Wi-Fi、LAN、DNS、PassWall/OpenClash 开关或系统设置。全新安装仍应用公开临时 Wi-Fi 等默认值。
 
@@ -97,6 +115,7 @@ python3 devices/sl3000_emmc/rf_test.py capture \
 - 下载目录 `dl` 与编译缓存 `.ccache` 分别恢复、保存，不缓存整个源码树、`build_dir`、`staging_dir`、注入密码的脚本或成品固件。
 - 下载成功后立即保存源码缓存，即使后续编译失败也能复用。优先匹配相同配方，未命中时回退到同一 runner 环境的下载缓存，仍执行源码下载校验。普通构建命中相同配方时不重复上传；干净重建总是尝试保存新快照。
 - 编译缓存只在编译成功并完成缓存统计后保存，不依赖后续固件上传成功。缓存键隔离 runner 系统、架构和完整构建配方；包含 run ID 与重跑次数，避免覆盖不可变缓存。ccache 按编译器内容识别兼容性，并限制为 2 GiB。缓存服务失败不会绕过构建与产物校验，也不应单独导致固件构建失败。
+- 编译缓存还按 generic / rf-test / nor-probe / factory-test 模式隔离；私有 RF/NOR 测试仍不保存编译缓存。公共 Factory 模式不注入私人校准，因此允许保存该模式的编译缓存。
 - 编译任务数取 CPU 数和内存预算的较小值：从可用内存中预留 1 GiB，每个 make 任务按 3 GiB 预算，至少为 1。公开仓库的标准 `ubuntu-24.04` runner 为 4 CPU / 16 GB，内存充足时使用 `-j4`；内存不足时自动降低。这个预算不是硬性内存限制，Go、Rust 和链接阶段仍需要观察实际占用。下载仍使用 `-j8`。
 - Actions 日志记录实际 CPU、可用内存和下载耗时，摘要记录编译耗时、并发数、恢复的缓存键、ccache 命中统计和缓存大小。ccache 主要加速 C/C++，暂不增加 Go/Rust 编译缓存，不承诺固定提速比例。
 - 工作流更新仅作用于使用新提交启动的构建；已经运行的任务不会自动获得这些改动。

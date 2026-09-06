@@ -50,6 +50,8 @@ def validate_package_sources(tree):
 
 
 def prepare(tree):
+    import factory_test
+    factory_test.preflight()
     lock = json.loads((HERE / "sources.lock.json").read_text())
     validate_lock(lock)
     tree.mkdir(parents=True, exist_ok=True)
@@ -71,6 +73,7 @@ def prepare(tree):
     shutil.copy2(HERE / "files/mt7981b-sl-3000-emmc.dts", tree / "target/linux/mediatek/dts/")
     import nor_probe
     nor_probe.prepare(tree)
+    factory_test.prepare(tree)
     base = tree / "target/linux/mediatek/filogic/base-files"
     shutil.copy2(HERE / "files/03_sl3000-network", base / "etc/board.d/")
     (base / "etc/board.d/03_sl3000-network").chmod(0o755)
