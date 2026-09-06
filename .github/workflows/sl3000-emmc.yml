@@ -90,7 +90,7 @@ jobs:
             python3-pyelftools rsync swig unzip zlib1g-dev file wget zstd \
             libelf-dev libtool autoconf automake cmake ninja-build pkgconf \
             ccache curl jq patch perl time squashfs-tools gnupg device-tree-compiler \
-            u-boot-tools libarchive-tools
+            u-boot-tools libarchive-tools libjson-c-dev
           df -h .
 
       - name: Unit tests including compiled device trees
@@ -172,6 +172,17 @@ jobs:
         with:
           path: openwrt-sl3000/dl
           key: ${{ steps.cache_keys.outputs.download_key }}
+
+      - name: Test preserved-network migration with pinned native UCI
+        env:
+          SL3000_RF_TEST: 'false'
+          SL3000_NOR_PROBE: 'false'
+          SL3000_FACTORY_TEST: 'false'
+        run: |
+          python3 "$RECIPE/tests/build_network_test_tools.py" "$OPENWRT" "$RUNNER_TEMP/sl3000-network-tools"
+          export SL3000_TEST_UCODE="$RUNNER_TEMP/sl3000-network-tools/install/bin/ucode"
+          export SL3000_TEST_OPENWRT="$OPENWRT"
+          python3 -m unittest discover -s "$RECIPE/tests" -p 'test_network.py' -v
 
       - name: Select build parallelism and reset cache statistics
         id: resources

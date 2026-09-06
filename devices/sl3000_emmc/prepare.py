@@ -49,6 +49,25 @@ def validate_package_sources(tree):
             raise ValueError(f"Unexpected feed provider for {package}")
 
 
+def prepare_network(base):
+    if '\tsl,3000-emmc)\n' in (base / "etc/board.d/02_network").read_text():
+        raise ValueError("Source context changed: SL-3000 network case already exists")
+    anchor = 'mediatek_setup_interfaces()\n{\n\tlocal board="$1"\n\n\tcase $board in\n'
+    replace_once(base / "etc/board.d/02_network", anchor, anchor + '''\tsl,3000-emmc)
+\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" wan
+\t\t;;
+''')
+    for source, destination in (
+        ("03_sl3000-network", "etc/board.d/03_sl3000-network"),
+        ("98-sl3000-ports", "etc/uci-defaults/98-sl3000-ports"),
+        ("sl3000-ports.uc", "usr/libexec/sl3000-ports.uc"),
+    ):
+        path = base / destination
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HERE / "files" / source, path)
+        path.chmod(0o755 if source != "sl3000-ports.uc" else 0o644)
+
+
 def prepare(tree):
     import factory_test
     factory_test.preflight()
@@ -75,8 +94,7 @@ def prepare(tree):
     nor_probe.prepare(tree)
     factory_test.prepare(tree)
     base = tree / "target/linux/mediatek/filogic/base-files"
-    shutil.copy2(HERE / "files/03_sl3000-network", base / "etc/board.d/")
-    (base / "etc/board.d/03_sl3000-network").chmod(0o755)
+    prepare_network(base)
     shutil.copy2(HERE / "files/sl3000-upgrade.sh", base / "lib/upgrade/")
     platform = base / "lib/upgrade/platform.sh"
     replace_once(platform, 'REQUIRE_IMAGE_METADATA=1', 'REQUIRE_IMAGE_METADATA=1\n. /lib/upgrade/sl3000-upgrade.sh')

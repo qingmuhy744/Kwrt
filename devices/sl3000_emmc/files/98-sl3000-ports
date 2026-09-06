@@ -1,0 +1,9 @@
+#!/bin/sh
+
+[ "$(cat /tmp/sysinfo/board_name)" = "sl,3000-emmc" ] || exit 0
+if message=$(ucode /usr/libexec/sl3000-ports.uc 2>&1); then
+    [ -z "$message" ] || logger -t sl3000-ports "$message"
+    exit 0
+fi
+logger -t sl3000-ports "Port migration deferred: $message"
+exit 1

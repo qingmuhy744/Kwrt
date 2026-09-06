@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 BOARD = "sl,3000-emmc"
 PROFILE = "sl_3000-emmc"
 REQUIRED_PACKAGES = (
+    "ucode", "ucode-mod-fs", "ucode-mod-uci",
     "luci", "luci-ssl", "dnsmasq-full", "firewall4", "tailscale",
     "luci-app-tailscale-community", "luci-app-passwall", "luci-app-openclash", "ruby", "ruby-yaml",
     "mihomo", "xray-core", "sing-box", "chinadns-ng", "dns2socks", "ipt2socks",
@@ -109,11 +110,25 @@ def root_file(root, name):
     return subprocess.check_output(["unsquashfs", "-cat", str(root), name], stderr=subprocess.DEVNULL)
 
 
+def validate_network_files(read_file):
+    expected = b'\tsl,3000-emmc)\n\t\tucidef_set_interfaces_lan_wan "lan1 lan2 lan3" wan\n\t\t;;\n'
+    if read_file("etc/board.d/02_network").count(expected) != 1:
+        raise ValueError("SL-3000 single-pass port initialization missing")
+    for source, destination in (
+        ("03_sl3000-network", "etc/board.d/03_sl3000-network"),
+        ("98-sl3000-ports", "etc/uci-defaults/98-sl3000-ports"),
+        ("sl3000-ports.uc", "usr/libexec/sl3000-ports.uc"),
+    ):
+        if read_file(destination) != (HERE / "files" / source).read_bytes():
+            raise ValueError(f"SL-3000 network fix missing or changed: {destination}")
+
+
 def verify_rootfs(image, scratch, password):
     from inject_defaults import shell_assignment
     root = scratch / "root.squashfs"
     with tarfile.open(image) as archive, root.open("wb") as stream:
         shutil.copyfileobj(archive.extractfile(f"sysupgrade-{PROFILE}/root"), stream)
+    validate_network_files(lambda name: root_file(root, name))
     expected = (HERE / "firstboot.sh").read_text().replace("# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(password)).encode()
     if root_file(root, "etc/uci-defaults/99-sl3000-setup") != expected:
         raise ValueError("Firstboot settings are missing or differ from the validated template")

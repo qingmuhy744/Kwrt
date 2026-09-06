@@ -18,6 +18,7 @@ import rf_test
 import nor_probe
 import factory_test
 from test_rf_test import fixture, private_env
+from test_network import network_files
 
 IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
 INITRAMFS_NAME = f"{IMAGE_PREFIX}-initramfs.itb"
@@ -221,6 +222,7 @@ class RootfsRFTests(unittest.TestCase):
             core[:6] = b"\x7fELF\x02\x01"
             core[18:20] = b"\xb7\x00"
             files = {
+                **network_files(),
                 "etc/uci-defaults/99-sl3000-setup": (ROOT / "firstboot.sh").read_text().replace(
                     "# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(PASSWORD)).encode(),
                 "etc/openclash/core/clash_meta": bytes(core),

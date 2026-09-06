@@ -163,3 +163,5 @@ def validate_initramfs(path, scratch):
         def read_file(name):
             return subprocess.check_output(["bsdtar", "-xOf", str(archive), paths[name]])
         validate_files(read_file, paths)
+        from verify import validate_network_files
+        validate_network_files(read_file)

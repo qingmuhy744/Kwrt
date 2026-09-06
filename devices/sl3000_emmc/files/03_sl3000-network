@@ -4,7 +4,7 @@
 
 [ "$(board_name)" = "sl,3000-emmc" ] || exit 0
 board_config_update
-ucidef_set_interfaces_lan_wan 'lan1 lan2 lan3' wan
+# Port roles are defined once in 02_network; ucidef appends to existing arrays.
 
 # The bootstrap layout has no factory MAC cell. Use a stable, locally administered
 # address derived from the physical eMMC CID, never a shared hardcoded MAC.

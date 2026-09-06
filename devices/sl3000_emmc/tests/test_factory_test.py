@@ -128,8 +128,9 @@ class FactoryFilesTests(unittest.TestCase):
     @unittest.skipUnless(all(shutil.which(tool) for tool in ("dtc", "fdtget", "dumpimage", "bsdtar")),
                          "FIT and CPIO inspection tools are required")
     def test_real_initramfs_payload_is_checked_for_public_fallback(self):
+        from test_network import network_files
         contents = self.root / "files"
-        for name, data in self.files.items():
+        for name, data in {**self.files, **network_files()}.items():
             path = contents / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
