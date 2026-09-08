@@ -152,7 +152,7 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(report["advisories"][0]["status"], "mentioned_in_baseline_release")
         self.assertEqual(report["new_advisories"], [])
         self.assertEqual(state["last_success"], monitor.iso(NOW))
-        self.assertIn("实机未验证", monitor.render_report(report))
+        self.assertIn("假定设备运行", monitor.render_report(report))
 
     def test_upstream_failure_does_not_advance_last_complete_check(self):
         previous = {"schema": 1, "last_success": "2026-09-01T00:00:00Z"}
@@ -197,14 +197,42 @@ class NotificationTests(unittest.TestCase):
         with patch.object(monitor, "urlopen", return_value=response):
             self.assertEqual(monitor.request_json("https://example.test"), {"ok": True})
 
-    def test_weekly_report_is_sent_even_without_new_findings(self):
+    def test_empty_weekly_report_is_silent(self):
         monday = NOW - timedelta(days=1)
         next_state = {}
         messages = monitor.notification(empty_report(), {}, next_state, monday)
-        self.assertEqual(len(messages), 1)
-        self.assertIn("每周", messages[0])
+        self.assertEqual(messages, [])
         self.assertIn("reported_week", next_state)
         self.assertEqual(monitor.notification(empty_report(), next_state, {}, monday), [])
+
+    def test_historical_high_advisories_and_unreviewed_signals_do_not_notify(self):
+        report = empty_report()
+        report["bootstrap"] = True
+        report["new_advisories"] = [{"id": "GHSA-old", "severity": "critical"}]
+        report["new_security_signals"] = [{"title": "uninstalled package security fix"}]
+        self.assertEqual(monitor.notification(report, {}, {}, NOW), [])
+
+    def test_only_pending_actions_notify_and_are_deduplicated(self):
+        report = empty_report()
+        report["actions"] = [{"key": "fix:one", "component": "uhttpd", "title": "Fix request smuggling",
+                              "packages": {"uhttpd": "1.0-r1"}, "url": "https://example.test/fix"}]
+        state = {}
+        messages = monitor.notification(report, {}, state, NOW)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("uhttpd", messages[0])
+        self.assertIn("1.0-r1", messages[0])
+        self.assertEqual(monitor.notification(report, state, {}, NOW), [])
+        weekly = monitor.notification(report, state, {}, NOW + timedelta(days=6))
+        self.assertEqual(len(weekly), 1)
+        self.assertIn("每周待处理", weekly[0])
+        report["actions"][0]["packages"]["uhttpd"] = "1.0-r2"
+        self.assertEqual(len(monitor.notification(report, state, {}, NOW)), 1)
+
+    def test_incomplete_scan_preserves_action_deduplication(self):
+        report, state = empty_report(), {}
+        report["errors"] = ["inventory temporarily unavailable"]
+        monitor.notification(report, {"action_fingerprints": {"old": "hash"}}, state, NOW)
+        self.assertEqual(state["action_fingerprints"], {"old": "hash"})
 
     def test_no_daily_noise_and_force_report(self):
         self.assertEqual(monitor.notification(empty_report(), {}, {}, NOW), [])

@@ -378,11 +378,24 @@ def markdown(value):
 def render_report(report):
     lines = ["# SL3000 安全与版本检查", "", f"检查时间：{report['checked_at']}",
              f"基准：{markdown(report['baseline'])}", "",
-             "这是源码、发布说明和公开 GitHub 安全公告监测，不是完整固件漏洞扫描。",
-             "源码有更新或公告命中不等于当前设备受影响；未连接路由器核实运行版本、包清单与启用功能。",
-             "同一发布系列可能回移补丁，不能仅凭软件版本号判定漏洞。", "",
+             "按约定，假定设备运行当前配方构建的固件。用匹配配方的构建包清单筛选安全修复。",
+             "待处理表示已包含组件缺少上游安全修复，不表示所有漏洞触发条件都已在设备上验证。",
+             "无法确定适用性、已有本地补丁需复核的项目只保留在完整报告，不发送漏洞告警。", "",
              f"检查状态：{'不完整' if report['errors'] else '已完成所列数据源检查'}",
              f"最近完整检查：{report.get('last_success') or '尚无'}", ""]
+    inventory = report.get("inventory")
+    if inventory:
+        lines += [f"包清单：构建 [{inventory['workflow_run']}](https://github.com/{report['repository']}/actions/runs/{inventory['workflow_run']})，"
+                  f"{len(inventory['packages'])} 个包，已核对固件配方输入一致。", ""]
+    lines += ["## 需要处理的组件安全修复", "", "| 组件 | 构建中的版本 | 缺少的安全修复 |", "| --- | --- | --- |"]
+    for action in report.get("actions", []):
+        versions = ", ".join(sorted(set(action["packages"].values())))
+        lines += [f"| {markdown(action['component'])} | {markdown(versions)} | [{markdown(action['title'])}]({action['url']}) |"]
+    if not report.get("actions"):
+        lines += ["", "本次未确认需纳入的组件修复。检查失败或待核实项目不能视为已排除漏洞。"]
+    lines += ["", "处理方式：将所列补丁或安全版本纳入锁定源码，重新构建、验证并刷入固件。", ""]
+    if report.get("assessment_notes"):
+        lines += ["## 适用性核实限制", "", *["- " + markdown(note) for note in report["assessment_notes"]], ""]
     if report["errors"]:
         lines += ["## 未完成的检查", "", *["- " + markdown(error) for error in report["errors"]], ""]
     activity = report.get("activity")
@@ -404,19 +417,25 @@ def render_report(report):
                      f"[发布说明]({release['url']}) |")
     lines += ["", "## 安全修复线索（待核实）", ""]
     for signal in report["security_signals"]:
-        lines.append(f"- **{markdown(signal['component'])}**：[{markdown(signal['title'])}]({signal['url']})")
+        state = {"not_installed": "未安装", "scope_excluded": "功能范围已排除",
+                 "fix_pending": "需要纳入修复"}.get(signal.get("assessment"), "待核实，不推送")
+        lines.append(f"- **{markdown(signal['component'])}** [{state}]：[{markdown(signal['title'])}]({signal['url']})")
     if not report["security_signals"]:
         lines.append("本次未在监测范围内发现安全修复关键词线索；这不代表固件不存在漏洞。")
     lines += ["", "## 公开安全公告", "", "首次检查包含历史公告；需要结合实际包及回移补丁复核。", "",
               "| 公告 | 来源 | 严重度 | 状态 | 标题 |", "| --- | --- | --- | --- | --- |"]
     for item in report["advisories"]:
-        status = {"mentioned_in_baseline_release": "基线发布说明已提及，实机未验证",
-                  "outside_declared_release_range": "锁定版本在公告声明范围外，实机未验证"}.get(item["status"], "待核实")
+        status = {"mentioned_in_baseline_release": "基线发布说明已列为修复",
+                  "outside_declared_release_range": "锁定版本在公告声明范围外",
+                  "not_installed": "未安装相关包", "other_platform": "不适用于 Linux",
+                  "fixed_in_inventory": "构建版本已含修复", "fix_pending": "需要纳入修复"}.get(item["status"], "待核实，不推送")
         lines.append(f"| [{item['id']}]({item['url']}) | {markdown(item['repository'])} | {markdown(item['severity'])} | "
                      f"{status} | {markdown(item['title'])} |")
     lines += ["", "## 覆盖范围", "", "- 公告来源：" + ", ".join(ADVISORY_REPOS),
               "- 另外检查锁文件中各源码分支的后续提交，以及 OpenWrt 同系列和代理组件的正式版本说明。",
-              "- 仅识别安全关键词作为线索；未覆盖所有厂商公告、邮件列表、传递依赖和未公开漏洞。",
+              "- 推送需要包清单与配方匹配、组件已包含、后续提交明确涉及安全修复，并验证源码路径。",
+              "- 额外跟踪 uhttpd、cgi-io、odhcpd、rpcd、ubus、netifd、umdns 的精确上游提交；本地补丁需另行核实。",
+              "- 未覆盖所有厂商公告、邮件列表、静态/传递依赖和未公开漏洞；未知组件映射只进报告。",
               "- 检测不会更新锁文件、构建、发布或刷写固件；无新增线索不等于安全认证。", ""]
     return "\n".join(lines)
 
@@ -444,34 +463,37 @@ def notification(report, previous, next_state, now, force=False):
         messages.append("SL3000 检查恢复：本次已完成所列数据源检查。")
     next_state["error_digest"] = error_key
 
-    signals = report["new_security_signals"]
-    advisories = [item for item in report["new_advisories"] if item["severity"] in ("high", "critical")]
-    if signals or advisories:
-        title = "SL3000 首次安全线索汇总" if report["bootstrap"] else "SL3000 新的安全修复线索"
-        body = [title, "以下均需核实实际包版本及补丁，尚未确认路由器受影响。"]
-        for item in signals[:5]:
-            body += [f"{plain(item['component'], 45)}：{plain(item['title'], 160)}", item["url"]]
-        for item in advisories[:5]:
-            body += [f"{item['id']} [{item['severity']}] {plain(item['title'], 140)}", item["url"]]
-        body += [f"新增修复线索 {len(signals)} 条；新增/修订高危公告 {len(advisories)} 条。"]
-        if report["bootstrap"]:
-            body += ["首次扫描包含历史公告，其中部分可能早已修复，请查看报告中的基线状态。"]
+    actions = report.get("actions", [])
+    old_actions = previous.get("action_fingerprints", {})
+    fingerprints = {item["key"]: digest(item) for item in actions}
+    changed = [item for item in actions if old_actions.get(item["key"]) != fingerprints[item["key"]]]
+    # Incomplete scans must not clear observations for temporarily missing sources.
+    next_state["action_fingerprints"] = {**old_actions, **fingerprints} if errors else fingerprints
+    selected = actions if force or weekly else changed
+    if selected:
+        groups = {}
+        for action in selected:
+            groups.setdefault(action["component"], []).append(action)
+        label = "SL3000 待处理的安全修复" if force or not weekly else "SL3000 每周待处理修复"
+        body = [label, f"基准：{plain(report['baseline'], 160)}"]
+        for component, items in groups.items():
+            versions = ", ".join(sorted({value for item in items for value in item["packages"].values()}))
+            body += [f"\n{plain(component)} | 当前 {plain(versions, 120)} | {len(items)} 项修复"]
+            for item in items[:3]:
+                body += [plain(item["title"], 160), item["url"]]
+            if len(items) > 3:
+                body += [f"其余 {len(items) - 3} 项见完整报告。"]
+        body += ["\n处理：纳入所列安全补丁或安全版本，重新构建、验证并刷入。"]
+        if weekly and activity:
+            body += [f"仓库估算 {activity['days']} 天无提交；45/55/59 天会另发停用预警。"]
+        if errors:
+            body += ["本次部分检查失败，以上仅为已核实项目。"]
         messages.append("\n".join(body))
-
-    if force or weekly or report["bootstrap"] or report.get("baseline_changed"):
-        label = "SL3000 安全检查报告" if force or report["bootstrap"] else "SL3000 每周安全检查"
-        changed = sum(source["ahead_by"] > 0 for source in report["sources"])
-        body = [label, f"时间：{now.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')}（北京时间）",
-                f"基准：{plain(report['baseline'], 180)}",
-                f"检查状态：{'不完整' if errors else '已完成所列数据源检查'}",
-                f"有后续提交的源码：{changed}；安全修复线索：{len(report['security_signals'])}。",
-                f"公开公告：{len(report['advisories'])}；检查失败：{len(errors)}。"]
-        if activity:
-            body += [f"默认分支估算 {activity['days']} 天无提交；45/55/59 天会发停用预警。"]
-        body += ["报告仅监测公开更新线索，不是完整漏洞审计；尚未核实实机运行版本。"]
-        messages.append("\n".join(body))
-        if weekly:
-            next_state["reported_week"] = week
+    elif force:
+        messages.append("SL3000 手动检查结果\n" + ("检查不完整，不能判断是否没有待处理修复。" if errors else
+                        "本次监测范围内没有已确认需纳入的组件安全修复。") + "\n基准：" + plain(report["baseline"]))
+    if weekly:
+        next_state["reported_week"] = week
 
     suffix = "\n完整报告与运行记录：\n" + report["run_url"] if report["run_url"] else ""
     return [message + suffix for message in messages]
@@ -508,10 +530,10 @@ def baseline_lock(github, repository, recipe):
         path = "devices/sl3000_emmc/sources.lock.json"
         content = github.get(f"repos/{repository}/contents/{path}?" + urlencode({"ref": recipe}))
         lock = json.loads(base64.b64decode(content["content"], validate=False))
-        label = f"人工登记的已刷入配方 {recipe[:12]}（实机未核实）"
+        label = f"约定运行配方 {recipe[:12]} 的锁定源码"
     else:
         lock = json.loads((HERE / "sources.lock.json").read_text())
-        label = "仓库当前锁定版本（实机版本未核实）"
+        label = "按约定运行 GitHub 当前默认分支配方的锁定源码"
     from prepare import validate_lock
     validate_lock(lock)
     return lock, label
@@ -552,6 +574,18 @@ def main():
         run_id = os.environ.get("GITHUB_RUN_ID", "")
         run_url = f"https://github.com/{args.repository}/actions/runs/{run_id}" if run_id.isdecimal() else ""
         report, next_state = scan(github, args.repository, lock, previous, now, baseline, run_url, progress=True)
+        try:
+            from security_inventory import load as load_inventory
+            from security_assessment import assess
+            inventory = load_inventory(github, args.repository, lock, previous, os.environ.get("SL3000_DEPLOYED_RECIPE", ""))
+            next_state["inventory"] = inventory
+            print("Assessing installed components against matching build inventory", flush=True)
+            assess(github, lock, inventory, report)
+        except (RemoteError, ValueError, KeyError, TypeError, OSError) as error:
+            report["errors"].append(f"Package applicability: {error}")
+        if report["errors"]:
+            report["last_success"] = previous.get("last_success")
+            next_state["last_success"] = previous.get("last_success")
         messages = notification(report, previous, next_state, now, args.force_report)
         args.output.mkdir(parents=True, exist_ok=True)
         (args.output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")

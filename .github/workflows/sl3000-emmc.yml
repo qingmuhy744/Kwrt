@@ -258,6 +258,19 @@ jobs:
           compression-level: 0
           retention-days: 14
 
+      - name: Collect public security inventory
+        if: ${{ !inputs.rf_test }}
+        run: python3 "$RECIPE/security_inventory.py" "$RUNNER_TEMP/sl3000-release" --openwrt "$OPENWRT" --output "$RUNNER_TEMP/security-inventory.json"
+
+      - name: Upload public security inventory
+        if: ${{ !inputs.rf_test }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sl3000-security-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/security-inventory.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Encrypt device-specific RF test artifacts
         if: ${{ inputs.rf_test }}
         env:
