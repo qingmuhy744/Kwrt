@@ -113,7 +113,7 @@ jobs:
       - name: Compute independent cache keys
         id: cache_keys
         env:
-          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/factory_test.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**', 'devices/sl3000_emmc/patches/**') }}
+          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/hardening.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/factory_test.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**', 'devices/sl3000_emmc/patches/**') }}
           BUILD_PROFILE: ${{ inputs.factory_test && 'factory-test' || inputs.nor_probe && 'nor-probe' || inputs.rf_test && 'rf-test' || 'generic' }}
         run: |
           namespace="sl3000-v2-ubuntu-24.04-${RUNNER_OS}-${RUNNER_ARCH}"

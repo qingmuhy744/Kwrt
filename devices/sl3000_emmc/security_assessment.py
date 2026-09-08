@@ -26,6 +26,7 @@ COMPONENTS = {
     "c-ares": ("packages", "libs/c-ares", ("libcares*",), None),
     "bind": ("packages", "net/bind", ("bind-*",), None),
     "tailscale": ("packages", "net/tailscale", ("tailscale",), None),
+    "golang": ("packages", "lang/golang/golang1.26", (), None),
     "xray-core": ("passwall_packages", "xray-core", ("xray-core",), None),
     "sing-box": ("passwall_packages", "sing-box", ("sing-box",), None),
     "passwall": ("passwall", "luci-app-passwall", ("luci-app-passwall",), None),
@@ -36,9 +37,54 @@ SECURITY_FIX = re.compile(
     r"use.after.free|buffer (?:over|under)(?:flow|read)|out.of.bounds (?:read|write)|"
     r"request smuggling|memory.exhaustion|\bvulnerabilit(?:y|ies)\b|漏洞修复", re.I)
 GHSA = re.compile(r"GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}", re.I)
+UHTTPD_FIXES = {
+    "GHSA-83vv-qrc6-h3hx": "42e30caa704e4e6e28fc7412e0006959eb247c44",
+    "GHSA-2mpg-6wp5-435p": "e76736e5676fb25536b27d45865eb4153c68aca3",
+    "GHSA-vhx4-3p5q-m59q": "f6c2fcfa539de49ddf6de8f805110c8804602e98",
+    "GHSA-wvgh-cm54-q6f6": "3c48b9e17d2086f9756b97e5825c2ebdf3ed233a",
+    "GHSA-c2wg-hcff-hqrm": "d6205aad61763b5e5d86441164b3aeed83294e7f",
+}
+MOUNTS_ADVISORY = "GHSA-v5f9-62c7-cw29"
+# Each inner group requires any feature; all groups must be satisfied.
+TAILSCALE_CONDITIONS = {
+    "TS-2026-011": (("tailscale_4via6",),),
+    "TS-2026-010": (("tailscale_ssh",), ("tailscale_ssh_accept_env",)),
+    "TS-2026-009": (("tailscale_ssh",), ("tailscale_ssh_nonroot_policy",)),
+    "TS-2026-008": (("tailscale_serve", "tailscale_funnel"),),
+    "TS-2026-007": (("tailscale_services",),),
+    "TS-2026-006": (("tailscale_ssh",), ("tailscale_ssh_nonroot_policy",)),
+    "TS-2026-005": (("tailscale_serve",), ("tailscale_nonroot_operator",), ("tailscale_privileged_sockets",)),
+    "TS-2026-004": (("tailscale_ssh",), ("tailscale_shared_socket_permissions",)),
+}
+
+
+def validate_policy(policy):
+    if not isinstance(policy, dict):
+        raise ValueError("Security policy must be a JSON object")
+    features = {"luci_delegated_users"} | {key for groups in TAILSCALE_CONDITIONS.values() for group in groups for key in group}
+    values = policy.get("features", {})
+    if policy.get("schema") != 1 or not isinstance(policy.get("basis"), str) or not policy["basis"].strip():
+        raise ValueError("Security policy requires a schema and an explicit usage basis")
+    if not isinstance(values, dict) or any(key not in features or value is not None and type(value) is not bool
+                                          for key, value in values.items()):
+        raise ValueError("Security policy features must be known booleans or null")
+    return policy
+
+
+def applicability(identifier, policy):
+    values = (policy or {}).get("features", {})
+    groups = (("luci_delegated_users",),) if identifier == MOUNTS_ADVISORY else TAILSCALE_CONDITIONS.get(identifier)
+    if not groups:
+        return None
+    known = [True if any(values.get(key) is True for key in group) else
+             False if all(values.get(key) is False for key in group) else None for group in groups]
+    return False if False in known else True if all(value is True for value in known) else None
 
 
 def packages_for(name, inventory):
+    if name == "golang":
+        current = inventory.get("build_tools", {}).get("golang")
+        return {"golang/host": current} if current else {}
     selectors = COMPONENTS[name][2] if name in COMPONENTS else (name,)
     return {package: version for package, version in inventory["packages"].items()
             if any(fnmatchcase(package, selector) for selector in selectors)}
@@ -80,10 +126,11 @@ def scope_exclusion(sha, inventory):
     return None
 
 
-def assess(github, lock, inventory, report):
+def assess(github, lock, inventory, report, policy=None):
     actions, errors = [], []
     sources = {source["name"]: source for source in report["sources"]}
     advisory_fixes = {}
+    fixed_advisories, component_pins = {}, {}
     included_commits = {}
     updates = inventory.get("verified_package_updates", {})
     if updates != lock.get("package_updates", {}):
@@ -91,9 +138,13 @@ def assess(github, lock, inventory, report):
     for name, update in updates.items():
         if name not in COMPONENTS or (update["source"], update["path"]) != COMPONENTS[name][:2]:
             raise ValueError("Package update does not match the monitored component")
+    if inventory.get("verified_hardening", []) != lock.get("hardening", []):
+        raise ValueError("Firmware hardening provenance does not match the source lock")
+    if policy is not None:
+        report["usage_policy"] = validate_policy(policy)
 
-    def add(name, key, title, url, message, kind):
-        identifiers = sorted(set(GHSA.findall(message)))
+    def add(name, key, title, url, message, kind, identifiers=None):
+        identifiers = sorted(set(GHSA.findall(message) if identifiers is None else identifiers))
         sha = key.rsplit(":", 1)[-1]
         if kind == "component_security_fix":
             for existing in actions:
@@ -129,7 +180,9 @@ def assess(github, lock, inventory, report):
         else:
             continue
         if not selected:
-            signal["assessment"] = "not_installed"
+            # Go's standard library is linked into installed applications even
+            # when the compiler is absent from the target package manifest.
+            signal["assessment"] = "needs_review" if name == "golang" else "not_installed"
             continue
         update = updates.get(name)
         if not update and any(path.startswith(paths) for path in inventory.get("source_overrides", {}).get(feed, [])):
@@ -142,19 +195,24 @@ def assess(github, lock, inventory, report):
         if repo != expected_repo:
             continue
         try:
+            change = github.get(f"repos/{repo}/commits/{sha}")
+            message = change["commit"]["message"]
             if update:
                 status = "identical" if sha == update["commit"] else github.get(
                     f"repos/{repo}/compare/{sha}...{update['commit']}")["status"]
                 if status in ("ahead", "identical"):
                     signal["assessment"] = "fixed_in_inventory"
+                    fixed_advisories.update({key: signal["url"] for key in GHSA.findall(message)})
                     continue
                 if status != "behind":
                     signal.update(assessment="needs_review", reason="Package update and feed fix have diverged histories")
                     continue
-            change = github.get(f"repos/{repo}/commits/{sha}")
-            message = change["commit"]["message"]
             if not SECURITY_FIX.search(message) or not any(
                     item["filename"].startswith(paths) for item in change["files"]):
+                continue
+            identifiers = GHSA.findall(message)
+            if identifiers and all(applicability(key, policy) is False for key in identifiers):
+                signal.update(assessment="scope_excluded", reason="Excluded by the declared usage policy")
                 continue
             signal["assessment"] = "fix_pending"
             add(name, signal["key"], signal["title"], signal["url"], message, "feed_security_update")
@@ -182,6 +240,7 @@ def assess(github, lock, inventory, report):
                 report.setdefault("assessment_notes", []).append(
                     f"{name}: local patch directory requires review before claiming an upstream fix is missing")
                 continue
+            component_pins[name] = pinned[1]
             branch = "openwrt-" + ".".join(lock["openwrt"]["release"].split(".")[:2])
             branches = github.pages(f"repos/{upstream}/branches")
             matching = next((item["commit"]["sha"] for item in branches if item["name"] == branch), None)
@@ -207,15 +266,55 @@ def assess(github, lock, inventory, report):
             errors.append(f"Assess {name} upstream fixes: {error}")
 
     for advisory in report["advisories"]:
+        identifier = advisory["id"]
+        if identifier in inventory.get("verified_hardening", []):
+            advisory.update(status="fixed_in_inventory", reason="Firmware ACL hardening was verified in this build")
+            continue
+        if identifier in fixed_advisories:
+            advisory.update(status="fixed_in_inventory", fix_url=fixed_advisories[identifier])
+            continue
+        if advisory["repository"] == "openwrt/uhttpd" and identifier in UHTTPD_FIXES and "uhttpd" in component_pins:
+            fix = UHTTPD_FIXES[identifier]
+            try:
+                comparison = github.get(f"repos/openwrt/uhttpd/compare/{fix}...{component_pins['uhttpd']}")
+                if comparison["status"] in ("ahead", "identical"):
+                    advisory.update(status="fixed_in_inventory", fix_url=f"https://github.com/openwrt/uhttpd/commit/{fix}")
+                    continue
+            except (RuntimeError, ValueError, KeyError, TypeError) as error:
+                errors.append(f"Assess {identifier}: {error}")
         if advisory["id"] in advisory_fixes:
             advisory.update(status="fix_pending", fix_url=advisory_fixes[advisory["id"]])
             continue
         title = advisory["title"]
         package_names = set(re.findall(r"\bluci-(?:app|proto|lib)-[a-z0-9-]+", title))
+        if identifier == "GHSA-8qcq-jgrj-gvmj":
+            package_names = {"luci-app-bmx7"}
+        elif identifier == MOUNTS_ADVISORY:
+            package_names = {"luci-mod-system"}
         if "luci-lib-px5g" in title:
             package_names = {"luci-lib-px5g"}
         if package_names and not any(name in inventory["packages"] for name in package_names):
             advisory["status"] = "not_installed"
+            continue
+        if identifier == "GHSA-vvj6-7362-pjrw":
+            current = inventory["packages"].get("luci-mod-network")
+            if not current:
+                advisory["status"] = "not_installed"
+                continue
+            date_version = re.fullmatch(r"(\d+\.\d+\.\d+)~[0-9a-f]+(?:-r\d+)?", current)
+            custom = any(path.startswith("modules/luci-mod-network/") for path in inventory.get("source_overrides", {}).get("luci", []))
+            if date_version and version(date_version[1]) >= (26, 72, 65753) and not custom:
+                advisory.update(status="fixed_in_inventory", reason="LuCI build is at or after the published fixed version")
+                continue
+        if identifier == MOUNTS_ADVISORY:
+            advisory["condition"] = "Requires a delegated LuCI/rpcd account with mount-configuration write access"
+            if applicability(identifier, policy) is False:
+                advisory.update(status="configuration_excluded", reason="The owner declares no delegated LuCI administrators")
+            elif applicability(identifier, policy) is True:
+                add("luci-mod-system", "advisory:" + identifier, title, advisory["url"], identifier, "acl_security_fix")
+                advisory["status"] = "fix_pending"
+            else:
+                advisory["status"] = "configuration_review"
             continue
         if advisory["repository"] == "openwrt/mdnsd" and "umdns" not in inventory["packages"]:
             advisory["status"] = "not_installed"
@@ -231,6 +330,15 @@ def assess(github, lock, inventory, report):
                 advisory["status"] = "not_installed"
             elif fixed_version(advisory, installed):
                 advisory["status"] = "fixed_in_inventory"
+            elif advisory.get("vendor") == "tailscale":
+                if applicability(identifier, policy) is False:
+                    advisory.update(status="configuration_excluded", reason="The owner-declared usage lacks a required condition")
+                elif version(installed) and applicability(identifier, policy) is True and any(
+                        version(item.get("patched_versions")) for item in advisory.get("vulnerabilities", [])):
+                    add(name, "advisory:" + identifier, title, advisory["url"], "", "vendor_security_fix", [identifier])
+                    advisory["status"] = "fix_pending"
+                else:
+                    advisory.update(status="configuration_review", reason="Installed version and vendor scope require runtime configuration review")
 
     report["inventory"] = {key: inventory[key] for key in ("recipe_digest", "recipe_commit", "workflow_run", "packages")}
     release_packages = {"XTLS/Xray-core": "xray-core", "SagerNet/sing-box": "sing-box", "tailscale/tailscale": "tailscale"}

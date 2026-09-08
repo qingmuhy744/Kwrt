@@ -130,6 +130,23 @@ class ReleaseTests(unittest.TestCase):
 
 
 class ScanTests(unittest.TestCase):
+    def test_vendor_failure_marks_scan_incomplete(self):
+        lock = json.loads((ROOT / "sources.lock.json").read_text())
+        def unavailable():
+            raise ValueError("RSS unavailable")
+        report, state = monitor.scan(FakeGitHub(), "example/repo", lock, {}, NOW, "test", "", vendor_fetch=unavailable)
+        self.assertIn("Tailscale official security RSS", report["errors"][0])
+        self.assertNotIn("last_success", state)
+
+    def test_vendor_bulletins_are_included_and_updates_are_deduplicated(self):
+        from test_security_vendor import rss
+        from security_vendor import parse_tailscale_bulletins
+        lock = json.loads((ROOT / "sources.lock.json").read_text())
+        fetch = lambda: parse_tailscale_bulletins(rss())
+        report, state = monitor.scan(FakeGitHub(), "example/repo", lock, {}, NOW, "test", "", vendor_fetch=fetch)
+        self.assertEqual([item["id"] for item in report["new_advisories"]], ["TS-2026-008"])
+        report, _ = monitor.scan(FakeGitHub(), "example/repo", lock, state, NOW, "test", "", vendor_fetch=fetch)
+        self.assertEqual(report["new_advisories"], [])
     def test_only_unambiguous_distribution_ranges_can_be_excluded(self):
         def advisory(name, value):
             return {"vulnerabilities": [{"package": {"name": name}, "vulnerable_version_range": value}]}
@@ -144,7 +161,8 @@ class ScanTests(unittest.TestCase):
 
     def scan(self, github=None, previous=None):
         lock = json.loads((ROOT / "sources.lock.json").read_text())
-        return monitor.scan(github or FakeGitHub(), "example/repo", lock, previous or {}, NOW, "test recipe", "")
+        return monitor.scan(github or FakeGitHub(), "example/repo", lock, previous or {}, NOW, "test recipe", "",
+                            vendor_fetch=lambda: [])
 
     def test_baseline_release_reference_is_not_an_affected_device_claim(self):
         report, state = self.scan()
@@ -237,6 +255,12 @@ class NotificationTests(unittest.TestCase):
     def test_no_daily_noise_and_force_report(self):
         self.assertEqual(monitor.notification(empty_report(), {}, {}, NOW), [])
         self.assertEqual(len(monitor.notification(empty_report(), {}, {}, NOW, True)), 1)
+
+    def test_manual_zero_actions_report_keeps_unresolved_conditions_visible(self):
+        report = empty_report()
+        report["advisories"] = [{"id": "TS-test", "status": "configuration_review"}]
+        self.assertEqual(monitor.notification(report, {}, {}, NOW), [])
+        self.assertIn("1 条公告", monitor.notification(report, {}, {}, NOW, True)[0])
 
     def test_error_notice_is_deduplicated_and_recovery_is_sent(self):
         report, state = empty_report(), {}

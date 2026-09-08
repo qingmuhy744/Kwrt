@@ -15,7 +15,23 @@
     "passwall": {"url": "https://github.com/Openwrt-Passwall/openwrt-passwall.git", "commit": "56adb0e2cbcf17e419524d46841d77a79474f327", "release": "26.9.1-1"},
     "openclash": {"url": "https://github.com/vernesong/OpenClash.git", "commit": "c3a33c1d3407956fdf8f0e0b7c1a4c52e6ad9593", "release": "v0.47.156"}
   },
+  "hardening": ["GHSA-v5f9-62c7-cw29"],
   "package_updates": {
+    "tailscale": {
+      "source": "packages",
+      "path": "net/tailscale",
+      "commit": "5caa62e0bc9f7fb9b0c12a23267bceb7724214dd",
+      "version": "1.102.3",
+      "sha256": "0e94d961c31ce7d33e8b7ce4ac6fdbec83ee5658784eed69eb7fce300729d717",
+      "packages": {"tailscale": "1.102.3-r1"}
+    },
+    "golang": {
+      "source": "packages",
+      "path": "lang/golang/golang1.26",
+      "commit": "af41897f31a4b5405acb0ca9d7ecdd357d193a9d",
+      "host_version": "1.26.6",
+      "packages": {}
+    },
     "uhttpd": {
       "source": "openwrt",
       "path": "package/network/services/uhttpd",

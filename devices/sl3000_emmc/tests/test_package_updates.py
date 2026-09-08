@@ -104,6 +104,28 @@ class PackageUpdateTests(unittest.TestCase):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 prepare.validate_lock(lock)
 
+    def test_source_override_requires_stable_version_and_checksum(self):
+        lock = copy.deepcopy(self.lock)
+        update = lock["package_updates"]["uhttpd"]
+        update.update(version="1.102.3", sha256="f" * 64)
+        prepare.validate_lock(lock)
+        original = b"PKG_VERSION:=1.98.3\nPKG_RELEASE:=1\nPKG_HASH:=" + b"a" * 64 + b"\n"
+        result = prepare.updated_makefile(original, update)
+        self.assertIn(b"PKG_VERSION:=1.102.3\n", result)
+        self.assertIn(b"PKG_HASH:=" + b"f" * 64, result)
+        for value in ("1.103.0-rc1", "nightly", "1.102.3\nother"):
+            update["version"] = value
+            with self.assertRaisesRegex(ValueError, "stable version"):
+                prepare.validate_lock(lock)
+
+    def test_host_toolchain_version_is_checked_without_installing_a_compiler_on_the_router(self):
+        lock = {"package_updates": {"golang": {"host_version": "1.26.6", "packages": {}}}}
+        with patch.object(prepare.subprocess, "check_output", return_value="go version go1.26.6 linux/amd64\n"):
+            self.assertEqual(prepare.verify_build_tools(self.tree, lock), {"golang": "1.26.6"})
+        with patch.object(prepare.subprocess, "check_output", return_value="go version go1.26.3 linux/amd64\n"):
+            with self.assertRaisesRegex(ValueError, "toolchain version"):
+                prepare.verify_build_tools(self.tree, lock)
+
 
 if __name__ == "__main__":
     unittest.main()

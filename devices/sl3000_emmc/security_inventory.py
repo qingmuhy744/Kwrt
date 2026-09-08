@@ -74,18 +74,24 @@ def collect(directory, root=HERE, openwrt=None):
         r"^# (CONFIG_[A-Za-z0-9_]+) is not set$", (directory / "openwrt.config").read_text(), re.M)})
     overrides = {}
     updates = {}
+    hardening_fixes, build_tools = [], {}
     if openwrt:
-        from prepare import verify_package_updates, validate_updated_packages
+        from prepare import verify_package_updates, validate_updated_packages, verify_build_tools
+        import hardening
         updates = verify_package_updates(openwrt, lock)
+        hardening_fixes = hardening.verify(
+            lambda name: (openwrt / "feeds/luci/modules/luci-mod-system/root" / name).read_bytes(), lock)
+        build_tools = verify_build_tools(openwrt, lock)
         validate_updated_packages(manifests[0].read_text(), lock)
         for name, tree in [("openwrt", openwrt), *[(name, openwrt / "feeds" / name) for name in lock["feeds"]]]:
             changed = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=tree, text=True).splitlines()
             added = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=tree, text=True).splitlines()
             overrides[name] = sorted(set(changed + added))
-    elif lock.get("package_updates"):
+    elif lock.get("package_updates") or lock.get("hardening"):
         raise ValueError("Package updates require verification against the build source tree")
     return {"schema": 1, "recipe_digest": recipe_digest(root), "lock": lock, "source_overrides": overrides,
             "verified_package_updates": updates,
+            "verified_hardening": hardening_fixes, "build_tools": build_tools,
             "recipe_commit": provenance["recipe_commit"], "workflow_run": provenance["workflow_run"],
             "packages": parse_manifest(manifests[0].read_text()),
             "flags": {key: value for key, value in flags.items()
@@ -97,6 +103,11 @@ def validate(inventory, expected, lock):
         return False
     if inventory.get("verified_package_updates", {}) != lock.get("package_updates", {}):
         return False
+    if inventory.get("verified_hardening", []) != lock.get("hardening", []):
+        return False
+    for name, update in lock.get("package_updates", {}).items():
+        if "host_version" in update and inventory.get("build_tools", {}).get(name) != update["host_version"]:
+            return False
     packages = inventory.get("packages", {})
     manifest = "\n".join(f"{name} - {version}" for name, version in packages.items())
     parse_manifest(manifest)

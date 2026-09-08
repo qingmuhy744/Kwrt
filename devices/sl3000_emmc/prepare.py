@@ -29,7 +29,7 @@ def validate_lock(lock):
         source, path = update["source"], update["path"]
         if source not in ("openwrt", *lock["feeds"]):
             raise ValueError("Unknown package update source")
-        if not path or any(not re.fullmatch(r"[\w+-]+", part) for part in path.split("/")):
+        if not path or any(not re.fullmatch(r"[\w+-][\w+.-]*", part) for part in path.split("/")):
             raise ValueError("Invalid package update path")
         if source == "openwrt" and not path.startswith("package/"):
             raise ValueError("Only package recipes may override the OpenWrt baseline")
@@ -41,7 +41,14 @@ def validate_lock(lock):
             raise ValueError("Package updates must use full commit SHAs")
         if "release" in update and not re.fullmatch(r"[1-9][0-9]*", update["release"]):
             raise ValueError("Invalid package release override")
-        if not update.get("packages") or any(not re.fullmatch(r"[A-Za-z0-9+_.-]+", package)
+        if "version" in update or "sha256" in update:
+            if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", update.get("version", "")) or not re.fullmatch(
+                    r"[0-9a-f]{64}", update.get("sha256", "")):
+                raise ValueError("Source version overrides require a stable version and SHA-256")
+        if "host_version" in update and (name != "golang" or source != "packages" or
+                path != "lang/golang/golang1.26" or not re.fullmatch(r"1\.26\.[0-9]+", update["host_version"])):
+            raise ValueError("Unsupported host toolchain update")
+        if (not update.get("packages") and "host_version" not in update) or any(not re.fullmatch(r"[A-Za-z0-9+_.-]+", package)
                 or not re.fullmatch(r"[^\s]+-r[0-9]+", version) for package, version in update["packages"].items()):
             raise ValueError("Package updates must declare expected APK versions")
         patch_names = set()
@@ -53,6 +60,9 @@ def validate_lock(lock):
             patch_names.add(patch["file"])
             if not re.fullmatch(r"[0-9a-f]{40}", patch["commit"]) or not re.fullmatch(r"[0-9a-f]{64}", patch["sha256"]):
                 raise ValueError("Package patches must pin their upstream commit and checksum")
+    from hardening import FIXES
+    if not isinstance(lock.get("hardening", []), list) or any(item not in FIXES for item in lock.get("hardening", [])):
+        raise ValueError("Unsupported firmware hardening fix")
 
 
 def run(*args, cwd):
@@ -71,11 +81,15 @@ def replace_once(path, old, new):
 
 
 def updated_makefile(data, update):
-    if "release" not in update:
-        return data
-    data, count = re.subn(rb"(?m)^PKG_RELEASE:=[0-9]+$", b"PKG_RELEASE:=" + update["release"].encode(), data)
-    if count != 1:
-        raise ValueError("Package release source context changed")
+    for key, variable, pattern in (("release", "PKG_RELEASE", rb"[0-9]+"),
+                                   ("version", "PKG_VERSION", rb"[0-9]+(?:\.[0-9]+)+"),
+                                   ("sha256", "PKG_HASH", rb"[0-9a-f]{64}")):
+        if key not in update:
+            continue
+        data, count = re.subn(rb"(?m)^" + variable.encode() + rb":=" + pattern + rb"$",
+                             variable.encode() + b":=" + update[key].encode(), data)
+        if count != 1:
+            raise ValueError(f"Package {key} source context changed")
     return data
 
 
@@ -142,6 +156,19 @@ def verify_package_updates(tree, lock):
             if hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != digest:
                 raise ValueError(f"Package recipe content differs from lock: {name}/{path}")
     return lock.get("package_updates", {})
+
+
+def verify_build_tools(tree, lock):
+    tools = {}
+    for name, update in lock.get("package_updates", {}).items():
+        if "host_version" not in update:
+            continue
+        compiler = tree / "staging_dir/hostpkg/lib/go-1.26/bin/go"
+        output = subprocess.check_output([str(compiler), "version"], text=True).strip()
+        if not output.startswith("go version go" + update["host_version"] + " "):
+            raise ValueError("Go build toolchain version differs from lock")
+        tools[name] = update["host_version"]
+    return tools
 
 
 def validate_updated_packages(text, lock):
@@ -251,6 +278,8 @@ def prepare(tree):
         if any(update["source"] == name for update in lock.get("package_updates", {}).values()):
             run("./scripts/feeds", "update", "-i", name, cwd=tree)
     verify_package_updates(tree, lock)
+    import hardening
+    hardening.prepare(tree, lock)
     run("./scripts/feeds", "install", "-a", cwd=tree)
     # Only these proxy packages override the release feed; toolchain stays official.
     # -f only replaces core recipes, not an already installed feed recipe.

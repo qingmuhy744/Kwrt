@@ -137,6 +137,8 @@ def verify_rootfs(image, scratch, password):
         raise ValueError("Mihomo is not a little-endian AArch64 ELF executable")
     eeprom = root_file(root, "lib/firmware/mediatek/mt7981_eeprom_mt7976_dbdc.bin")
     lock = json.loads((HERE / "sources.lock.json").read_text())
+    import hardening
+    hardening.verify(lambda name: root_file(root, name), lock)
     import rf_test
     if rf_test.enabled():
         expected_eeprom = rf_test.calibration()

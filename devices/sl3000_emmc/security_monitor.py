@@ -237,7 +237,7 @@ def load_state(path):
     return state
 
 
-def scan(github, repository, lock, previous, now, baseline, run_url, progress=False):
+def scan(github, repository, lock, previous, now, baseline, run_url, progress=False, vendor_fetch=None):
     report = {
         "schema": 1, "checked_at": iso(now), "repository": repository,
         "baseline": baseline, "lock_digest": digest(lock), "run_url": run_url,
@@ -356,6 +356,16 @@ def scan(github, repository, lock, previous, now, baseline, run_url, progress=Fa
                 seen_advisories[key] = fingerprint
         attempt(repo + " advisories", check_advisories)
 
+    def check_vendor():
+        from security_vendor import tailscale_bulletins
+        for item in (vendor_fetch or tailscale_bulletins)():
+            report["advisories"].append(item)
+            fingerprint = digest(item)
+            if seen_advisories.get(item["id"]) != fingerprint:
+                report["new_advisories"].append(item)
+            seen_advisories[item["id"]] = fingerprint
+    attempt("Tailscale official security RSS", check_vendor)
+
     report["advisories"].sort(key=lambda item: item["updated_at"], reverse=True)
     report["new_advisories"].sort(key=lambda item: item["updated_at"], reverse=True)
     next_state["last_attempt"] = iso(now)
@@ -387,6 +397,18 @@ def render_report(report):
     if inventory:
         lines += [f"包清单：构建 [{inventory['workflow_run']}](https://github.com/{report['repository']}/actions/runs/{inventory['workflow_run']})，"
                   f"{len(inventory['packages'])} 个包，已核对固件配方输入一致。", ""]
+    counts = {}
+    for item in report["advisories"]:
+        counts[item["status"]] = counts.get(item["status"], 0) + 1
+    lines += [f"已确认待处理修复：{len(report.get('actions', []))} 项；"
+              f"公告中仍需核实：{counts.get('needs_review', 0) + counts.get('configuration_review', 0)} 项。", ""]
+    if report.get("usage_policy"):
+        policy = report["usage_policy"]
+        lines += ["## 已声明的使用条件", "", markdown(policy["basis"]),
+                  "这些条件来自使用约定，未登录设备读取实际配置；条件变化后应更新 security-policy.json。", ""]
+        for feature, value in policy["features"].items():
+            lines.append(f"- `{feature}`：{'未知' if value is None else '启用' if value else '未启用'}")
+        lines.append("")
     lines += ["## 需要处理的组件安全修复", "", "| 组件 | 构建中的版本 | 缺少的安全修复 |", "| --- | --- | --- |"]
     for action in report.get("actions", []):
         versions = ", ".join(sorted(set(action["packages"].values())))
@@ -429,12 +451,20 @@ def render_report(report):
         status = {"mentioned_in_baseline_release": "基线发布说明已列为修复",
                   "outside_declared_release_range": "锁定版本在公告声明范围外",
                   "not_installed": "未安装相关包", "other_platform": "不适用于 Linux",
+                  "configuration_excluded": "按已声明配置不适用",
+                  "configuration_review": "使用条件待核实，不推送",
                   "fixed_in_inventory": "构建版本已含修复", "fix_pending": "需要纳入修复"}.get(item["status"], "待核实，不推送")
         lines.append(f"| [{item['id']}]({item['url']}) | {markdown(item['repository'])} | {markdown(item['severity'])} | "
                      f"{status} | {markdown(item['title'])} |")
+    conditional = [item for item in report["advisories"] if item["status"] in ("configuration_review", "configuration_excluded")]
+    if conditional:
+        lines += ["", "## 公告适用条件", "", "| 公告 | 需要核实的条件 |", "| --- | --- |"]
+        for item in conditional:
+            lines.append(f"| [{item['id']}]({item['url']}) | {markdown(item.get('condition') or item.get('reason', ''))} |")
     lines += ["", "## 覆盖范围", "", "- 公告来源：" + ", ".join(ADVISORY_REPOS),
+              "- 另读取 Tailscale 官方安全公告 RSS，包括 GitHub Release 正文未列出的安全修复；读取或解析失败会标记检查不完整。",
               "- 另外检查锁文件中各源码分支的后续提交，以及 OpenWrt 同系列和代理组件的正式版本说明。",
-              "- 推送需要包清单与配方匹配、组件已包含、后续提交明确涉及安全修复，并验证源码路径。",
+              "- 推送需要包清单与配方匹配、组件已包含且缺少明确修复；已知运行条件按 security-policy.json 判断，未知条件只进完整报告。",
               "- 额外跟踪 uhttpd、cgi-io、odhcpd、rpcd、ubus、netifd、umdns 的精确上游提交；本地补丁需另行核实。",
               "- 未覆盖所有厂商公告、邮件列表、静态/传递依赖和未公开漏洞；未知组件映射只进报告。",
               "- 检测不会更新锁文件、构建、发布或刷写固件；无新增线索不等于安全认证。", ""]
@@ -491,8 +521,11 @@ def notification(report, previous, next_state, now, force=False):
             body += ["本次部分检查失败，以上仅为已核实项目。"]
         messages.append("\n".join(body))
     elif force:
+        unresolved = sum(item.get("status") in ("needs_review", "configuration_review") for item in report["advisories"])
         messages.append("SL3000 手动检查结果\n" + ("检查不完整，不能判断是否没有待处理修复。" if errors else
-                        "本次监测范围内没有已确认需纳入的组件安全修复。") + "\n基准：" + plain(report["baseline"]))
+                        "本次监测范围内没有已确认需纳入的组件安全修复。") +
+                        (f"\n另有 {unresolved} 条公告的版本或使用条件待核实，见完整报告。" if unresolved else "") +
+                        "\n基准：" + plain(report["baseline"]))
     if weekly:
         next_state["reported_week"] = week
 
@@ -577,11 +610,12 @@ def main():
         report, next_state = scan(github, args.repository, lock, previous, now, baseline, run_url, progress=True)
         try:
             from security_inventory import load as load_inventory
-            from security_assessment import assess
+            from security_assessment import assess, validate_policy
+            policy = validate_policy(json.loads((HERE / "security-policy.json").read_text()))
             inventory = load_inventory(github, args.repository, lock, previous, os.environ.get("SL3000_DEPLOYED_RECIPE", ""))
             next_state["inventory"] = inventory
             print("Assessing installed components against matching build inventory", flush=True)
-            assess(github, lock, inventory, report)
+            assess(github, lock, inventory, report, policy)
         except (RemoteError, ValueError, KeyError, TypeError, OSError) as error:
             report["errors"].append(f"Package applicability: {error}")
         if report["errors"]:

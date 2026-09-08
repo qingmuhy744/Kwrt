@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "basis": "Owner-confirmed usage: root is the only LuCI administrator; no delegated management accounts.",
+  "features": {
+    "luci_delegated_users": false
+  }
+}

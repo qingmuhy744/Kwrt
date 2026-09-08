@@ -139,6 +139,87 @@ class InventoryTests(unittest.TestCase):
 
 
 class AssessmentTests(unittest.TestCase):
+    def test_root_only_policy_excludes_only_the_reviewed_delegation_issue(self):
+        for delegated, expected, count in ((False, "configuration_excluded", 0),
+                                            (None, "configuration_review", 0), (True, "fix_pending", 1)):
+            with self.subTest(delegated=delegated):
+                data, result = baseline(), report()
+                data["packages"] = {"luci-mod-system": "26.180.75667~128a781"}
+                result["advisories"] = [{"id": assessment.MOUNTS_ADVISORY, "repository": "openwrt/luci", "title": "Mount ACL",
+                                         "url": "https://example.test/mounts"}]
+                policy = {"schema": 1, "basis": "Owner declaration", "features": {"luci_delegated_users": delegated}}
+                self.assertEqual(len(assessment.assess(FakeGitHub(), LOCK, data, result, policy)), count)
+                self.assertEqual(result["advisories"][0]["status"], expected)
+                self.assertIsNone(assessment.applicability("GHSA-unreviewed", policy))
+
+    def test_hardening_fix_needs_verified_build_provenance(self):
+        lock = {**LOCK, "hardening": [assessment.MOUNTS_ADVISORY]}
+        data, result = baseline(), report()
+        with self.assertRaisesRegex(ValueError, "hardening provenance"):
+            assessment.assess(FakeGitHub(), lock, data, result)
+        data["packages"] = {"luci-mod-system": "26.180.75667~128a781"}
+        data["verified_hardening"] = lock["hardening"]
+        result["advisories"] = [{"id": assessment.MOUNTS_ADVISORY, "repository": "openwrt/luci", "title": "Mount ACL"}]
+        self.assertEqual(assessment.assess(FakeGitHub(), lock, data, result), [])
+        self.assertEqual(result["advisories"][0]["status"], "fixed_in_inventory")
+
+    def test_included_uhttpd_commits_are_linked_back_to_advisories(self):
+        result = report()
+        result["advisories"] = [{"id": key, "title": "uhttpd issue", "repository": "openwrt/uhttpd"}
+                                for key in assessment.UHTTPD_FIXES]
+        assessment.assess(FakeGitHub(message="ordinary update"), LOCK, baseline(), result)
+        self.assertTrue(all(item["status"] == "fixed_in_inventory" for item in result["advisories"]))
+
+    def test_nonancestor_uhttpd_fix_is_not_claimed_as_included(self):
+        class Behind(FakeGitHub):
+            def get(self, path):
+                if any(f"/compare/{sha}..." in path for sha in assessment.UHTTPD_FIXES.values()):
+                    return {"status": "behind"}
+                return super().get(path)
+        result = report()
+        result["advisories"] = [{"id": next(iter(assessment.UHTTPD_FIXES)), "title": "uhttpd", "repository": "openwrt/uhttpd",
+                                 "status": "needs_review"}]
+        assessment.assess(Behind(message="ordinary update"), LOCK, baseline(), result)
+        self.assertEqual(result["advisories"][0]["status"], "needs_review")
+
+    def test_bmx7_absence_and_fixed_wifi_scan_are_classified(self):
+        data, result = baseline(), report()
+        data["packages"] = {"luci-mod-network": "26.180.75667~128a781"}
+        result["advisories"] = [
+            {"id": "GHSA-8qcq-jgrj-gvmj", "title": "Unchecked query traversal", "repository": "openwrt/luci"},
+            {"id": "GHSA-vvj6-7362-pjrw", "title": "WiFi scan XSS", "repository": "openwrt/luci"}]
+        assessment.assess(FakeGitHub(), LOCK, data, result)
+        self.assertEqual([item["status"] for item in result["advisories"]], ["not_installed", "fixed_in_inventory"])
+
+    def test_vendor_advisory_requires_an_installed_unfixed_version_and_known_usage(self):
+        for current, features, status, count in (
+                (None, {}, "not_installed", 0), ("1.102.3-r1", {}, "fixed_in_inventory", 0),
+                ("1.98.3-r1", {}, "configuration_review", 0),
+                ("custom-build", {"tailscale_serve": True}, "configuration_review", 0),
+                ("1.98.3-r1", {"tailscale_serve": False, "tailscale_funnel": False}, "configuration_excluded", 0),
+                ("1.98.3-r1", {"tailscale_serve": True}, "fix_pending", 1)):
+            with self.subTest(current=current, features=features):
+                data, result = baseline(), report()
+                data["packages"] = {"tailscale": current} if current else {}
+                result["advisories"] = [{"id": "TS-2026-008", "repository": "tailscale/tailscale", "vendor": "tailscale",
+                                         "title": "Serve availability", "url": "https://tailscale.com/security-bulletins/#ts-2026-008",
+                                         "vulnerabilities": [{"patched_versions": "1.98.9"}]}]
+                policy = {"schema": 1, "basis": "Test usage", "features": features}
+                self.assertEqual(len(assessment.assess(FakeGitHub(), LOCK, data, result, policy)), count)
+                self.assertEqual(result["advisories"][0]["status"], status)
+
+    def test_absent_target_go_package_does_not_exclude_embedded_standard_library(self):
+        data, result = baseline(), report()
+        data["packages"] = {"tailscale": "1.98.3-r1"}
+        result["security_signals"] = [{"key": "commit:openwrt/packages:" + "a" * 40, "title": "golang: security update",
+                                        "url": "https://example.test/go"}]
+        assessment.assess(FakeGitHub(), LOCK, data, result)
+        self.assertEqual(result["security_signals"][0]["assessment"], "needs_review")
+
+    def test_string_false_cannot_silently_disable_alerts(self):
+        with self.assertRaisesRegex(ValueError, "booleans"):
+            assessment.validate_policy({"schema": 1, "basis": "test", "features": {"luci_delegated_users": "false"}})
+
     def test_verified_package_update_uses_new_recipe_and_skips_only_declared_backport(self):
         update = {"source": "openwrt", "path": "package/network/services/uhttpd", "commit": "e" * 40,
                   "patches": [{"commit": "d" * 40}]}
