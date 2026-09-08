@@ -15,6 +15,49 @@
     "passwall": {"url": "https://github.com/Openwrt-Passwall/openwrt-passwall.git", "commit": "56adb0e2cbcf17e419524d46841d77a79474f327", "release": "26.9.1-1"},
     "openclash": {"url": "https://github.com/vernesong/OpenClash.git", "commit": "c3a33c1d3407956fdf8f0e0b7c1a4c52e6ad9593", "release": "v0.47.156"}
   },
+  "package_updates": {
+    "uhttpd": {
+      "source": "openwrt",
+      "path": "package/network/services/uhttpd",
+      "commit": "80de19ea3b6e34dd60c9e0f76f5b3a781331822d",
+      "release": "2",
+      "packages": {"uhttpd": "2026.08.03~60f64bec-r2", "uhttpd-mod-ubus": "2026.08.03~60f64bec-r2"},
+      "patches": [{
+        "file": "uhttpd/900-basic-auth-prefix.patch",
+        "commit": "3aa7e1c7678281220470e24784bcdcfb71bda6cf",
+        "sha256": "187fc38fca54edc854b3b7dfc2547533cbd01044213a0b7c634601a936d4205e"
+      }]
+    },
+    "rpcd": {
+      "source": "openwrt",
+      "path": "package/system/rpcd",
+      "commit": "029fec82456af6d7bd17c8aaff1e6bee1f477505",
+      "packages": {
+        "rpcd": "2026.07.19~e37ed9d8-r1",
+        "rpcd-mod-file": "2026.07.19~e37ed9d8-r1",
+        "rpcd-mod-iwinfo": "2026.07.19~e37ed9d8-r1",
+        "rpcd-mod-ucode": "2026.07.19~e37ed9d8-r1"
+      }
+    },
+    "mbedtls": {
+      "source": "openwrt",
+      "path": "package/libs/mbedtls",
+      "commit": "390a867118e18f63c03c1b504cbd00fe08e9defd",
+      "packages": {"libmbedtls21": "3.6.7-r1"}
+    },
+    "cgi-io": {
+      "source": "packages",
+      "path": "net/cgi-io",
+      "commit": "f36e3e98df4472c65e1e53c87a92894af0ac58ce",
+      "packages": {"cgi-io": "2026.07.21~31cb3c89-r1"}
+    },
+    "nghttp2": {
+      "source": "packages",
+      "path": "libs/nghttp2",
+      "commit": "fc8b2fec0ba9bcda54c0cbb2968a33f6b4637006",
+      "packages": {"libnghttp2-14": "1.70.0-r1"}
+    }
+  },
   "mihomo": {
     "version": "1.19.30",
     "url": "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-linux-arm64-v1.19.30.gz",

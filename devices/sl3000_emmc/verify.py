@@ -180,6 +180,8 @@ def artifacts(tree, destination):
     initramfs = one(target.glob(f"*-{PROFILE}-initramfs.itb"), "initramfs")
     manifest = one(target.glob(f"*-{PROFILE}.manifest"), "manifest")
     validate_manifest(manifest.read_text())
+    from prepare import validate_updated_packages
+    validate_updated_packages(manifest.read_text(), json.loads((HERE / "sources.lock.json").read_text()))
     validate_tar(sysupgrade)
     with initramfs.open("rb") as stream:
         if stream.read(4) != b"\xd0\x0d\xfe\xed":

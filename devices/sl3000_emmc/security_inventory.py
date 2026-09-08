@@ -15,7 +15,7 @@ PREFIX = "devices/sl3000_emmc/"
 
 
 def recipe_input(name):
-    return name in (".config", "sources.lock.json", "image.mk") or name.startswith(("files/", "packages/")) or (
+    return name in (".config", "sources.lock.json", "image.mk") or name.startswith(("files/", "packages/", "patches/")) or (
         "/" not in name and name.endswith(".py") and not name.startswith(("security_", "ci_")) and name != "verify.py")
 
 
@@ -73,12 +73,19 @@ def collect(directory, root=HERE, openwrt=None):
     flags.update({key: "n" for key in re.findall(
         r"^# (CONFIG_[A-Za-z0-9_]+) is not set$", (directory / "openwrt.config").read_text(), re.M)})
     overrides = {}
+    updates = {}
     if openwrt:
+        from prepare import verify_package_updates, validate_updated_packages
+        updates = verify_package_updates(openwrt, lock)
+        validate_updated_packages(manifests[0].read_text(), lock)
         for name, tree in [("openwrt", openwrt), *[(name, openwrt / "feeds" / name) for name in lock["feeds"]]]:
             changed = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=tree, text=True).splitlines()
             added = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=tree, text=True).splitlines()
             overrides[name] = sorted(set(changed + added))
+    elif lock.get("package_updates"):
+        raise ValueError("Package updates require verification against the build source tree")
     return {"schema": 1, "recipe_digest": recipe_digest(root), "lock": lock, "source_overrides": overrides,
+            "verified_package_updates": updates,
             "recipe_commit": provenance["recipe_commit"], "workflow_run": provenance["workflow_run"],
             "packages": parse_manifest(manifests[0].read_text()),
             "flags": {key: value for key, value in flags.items()
@@ -88,8 +95,13 @@ def collect(directory, root=HERE, openwrt=None):
 def validate(inventory, expected, lock):
     if inventory.get("schema") != 1 or inventory.get("recipe_digest") != expected or inventory.get("lock") != lock:
         return False
+    if inventory.get("verified_package_updates", {}) != lock.get("package_updates", {}):
+        return False
     packages = inventory.get("packages", {})
-    parse_manifest("\n".join(f"{name} - {version}" for name, version in packages.items()))
+    manifest = "\n".join(f"{name} - {version}" for name, version in packages.items())
+    parse_manifest(manifest)
+    from prepare import validate_updated_packages
+    validate_updated_packages(manifest, lock)
     if not re.fullmatch(r"[0-9a-f]{40}", inventory.get("recipe_commit", "")):
         raise ValueError("Invalid inventory provenance")
     if not str(inventory.get("workflow_run", "")).isdecimal():

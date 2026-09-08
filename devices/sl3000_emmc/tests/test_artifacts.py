@@ -47,7 +47,10 @@ class ArtifactCollectionTests(unittest.TestCase):
         self.initramfs = self.target / INITRAMFS_NAME
         self.initramfs.write_bytes(b"\xd0\x0d\xfe\xedtest")
         self.manifest = self.target / f"{IMAGE_PREFIX}.manifest"
-        self.manifest.write_text("\n".join(f"{name} - 1.0" for name in verify.REQUIRED_PACKAGES))
+        packages = dict.fromkeys(verify.REQUIRED_PACKAGES, "1.0")
+        for update in json.loads((ROOT / "sources.lock.json").read_text()).get("package_updates", {}).values():
+            packages.update(update["packages"])
+        self.manifest.write_text("\n".join(f"{name} - {version}" for name, version in packages.items()))
         kernel_config = self.tree / "build_dir/target-aarch64/linux-mediatek_filogic/linux-6.12.1/.config"
         kernel_config.parent.mkdir(parents=True)
         kernel_config.write_text("CONFIG_MMC=y\nCONFIG_MMC_BLOCK=y\nCONFIG_MMC_MTK=y\n")

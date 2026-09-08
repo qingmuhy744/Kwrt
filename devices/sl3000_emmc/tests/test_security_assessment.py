@@ -75,6 +75,17 @@ class InventoryTests(unittest.TestCase):
         self.assertFalse(inventory.validate(data, "different recipe", data["lock"]))
         self.assertFalse(inventory.validate(data, data["recipe_digest"], {"new": "lock"}))
 
+    def test_update_provenance_also_requires_the_fixed_binary_version(self):
+        data = baseline()
+        lock = {"package_updates": {"uhttpd": {"packages": {"uhttpd": "2026.08.03~60f64bec-r2"}}}}
+        data.update(lock=lock, verified_package_updates=lock["package_updates"])
+        with self.assertRaisesRegex(ValueError, "Security update missing"):
+            inventory.validate(data, "digest", lock)
+        data["packages"]["uhttpd"] = "2026.08.03~60f64bec-r2"
+        self.assertTrue(inventory.validate(data, "digest", lock))
+        data.pop("verified_package_updates")
+        self.assertFalse(inventory.validate(data, "digest", lock))
+
     def test_missing_matching_build_is_an_error(self):
         class NoBuilds:
             def get(self, path):
@@ -128,6 +139,46 @@ class InventoryTests(unittest.TestCase):
 
 
 class AssessmentTests(unittest.TestCase):
+    def test_verified_package_update_uses_new_recipe_and_skips_only_declared_backport(self):
+        update = {"source": "openwrt", "path": "package/network/services/uhttpd", "commit": "e" * 40,
+                  "patches": [{"commit": "d" * 40}]}
+        lock = {**LOCK, "package_updates": {"uhttpd": update}}
+        data = baseline()
+        data["verified_package_updates"] = lock["package_updates"]
+        data["source_overrides"] = {"openwrt": [update["path"] + "/Makefile", update["path"] + "/patches/fix.patch"]}
+
+        class UpdatedGitHub(FakeGitHub):
+            def get(self, path):
+                if "/contents/" in path:
+                    assert "ref=" + "e" * 40 in path
+                result = super().get(path)
+                if "/compare/" in path:
+                    result["commits"].append({"sha": "f" * 40, "commit": {"message": "Fixes CVE-2026-99999"},
+                                              "html_url": "https://example.test/new-fix"})
+                    result["total_commits"] = 2
+                return result
+
+        result = report()
+        actions = assessment.assess(UpdatedGitHub(), lock, data, result)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual([action["key"] for action in actions], ["commit:openwrt/uhttpd:" + "f" * 40])
+
+    def test_feed_security_update_already_imported_is_not_reported_again(self):
+        update = {"source": "openwrt", "path": "package/libs/mbedtls", "commit": "e" * 40}
+        lock = {**LOCK, "package_updates": {"mbedtls": update}}
+        data, result = baseline(), report()
+        data["packages"] = {"libmbedtls21": "3.6.7-r1"}
+        data["verified_package_updates"] = lock["package_updates"]
+        data["source_overrides"] = {"openwrt": [update["path"] + "/Makefile"]}
+        result["security_signals"] = [{"key": "commit:openwrt/openwrt:" + "e" * 40,
+                                        "title": "mbedtls: security update", "url": "https://example.test/fix"}]
+        self.assertEqual(assessment.assess(FakeGitHub(), lock, data, result), [])
+        self.assertEqual(result["security_signals"][0]["assessment"], "fixed_in_inventory")
+
+    def test_missing_package_update_provenance_cannot_hide_a_fix(self):
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            assessment.assess(FakeGitHub(), {**LOCK, "package_updates": {"uhttpd": {}}}, baseline(), report())
+
     def test_missing_upstream_fix_for_an_installed_component_is_actionable(self):
         data, result = baseline(), report()
         result["advisories"] = [{"id": "GHSA-abcd-efgh-ijkl", "title": "uhttpd issue", "repository": "openwrt/uhttpd"}]

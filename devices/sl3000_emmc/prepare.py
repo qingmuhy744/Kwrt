@@ -2,6 +2,7 @@
 """Prepare a dedicated, pinned OpenWrt source tree, not the Kwrt common build."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -23,6 +24,35 @@ def validate_lock(lock):
     for name in ("mihomo", "mt76_eeprom"):
         if not re.fullmatch(r"[0-9a-f]{64}", lock[name]["sha256"]):
             raise ValueError("Binary download must have a SHA-256 digest")
+    paths = []
+    for name, update in lock.get("package_updates", {}).items():
+        source, path = update["source"], update["path"]
+        if source not in ("openwrt", *lock["feeds"]):
+            raise ValueError("Unknown package update source")
+        if not path or any(not re.fullmatch(r"[\w+-]+", part) for part in path.split("/")):
+            raise ValueError("Invalid package update path")
+        if source == "openwrt" and not path.startswith("package/"):
+            raise ValueError("Only package recipes may override the OpenWrt baseline")
+        if any(source == other and (path == prefix or path.startswith(prefix + "/") or prefix.startswith(path + "/"))
+               for other, prefix in paths):
+            raise ValueError("Overlapping package update paths")
+        paths.append((source, path))
+        if not re.fullmatch(r"[0-9a-f]{40}", update["commit"]):
+            raise ValueError("Package updates must use full commit SHAs")
+        if "release" in update and not re.fullmatch(r"[1-9][0-9]*", update["release"]):
+            raise ValueError("Invalid package release override")
+        if not update.get("packages") or any(not re.fullmatch(r"[A-Za-z0-9+_.-]+", package)
+                or not re.fullmatch(r"[^\s]+-r[0-9]+", version) for package, version in update["packages"].items()):
+            raise ValueError("Package updates must declare expected APK versions")
+        patch_names = set()
+        for patch in update.get("patches", []):
+            if not re.fullmatch(re.escape(name) + r"/[A-Za-z0-9_.-]+\.patch", patch["file"]):
+                raise ValueError("Invalid package patch path")
+            if patch["file"] in patch_names:
+                raise ValueError("Duplicate package patch")
+            patch_names.add(patch["file"])
+            if not re.fullmatch(r"[0-9a-f]{40}", patch["commit"]) or not re.fullmatch(r"[0-9a-f]{64}", patch["sha256"]):
+                raise ValueError("Package patches must pin their upstream commit and checksum")
 
 
 def run(*args, cwd):
@@ -38,6 +68,88 @@ def replace_once(path, old, new):
     if text.count(old) != 1:
         raise ValueError(f"Source context changed: {path.name}")
     path.write_text(text.replace(old, new))
+
+
+def updated_makefile(data, update):
+    if "release" not in update:
+        return data
+    data, count = re.subn(rb"(?m)^PKG_RELEASE:=[0-9]+$", b"PKG_RELEASE:=" + update["release"].encode(), data)
+    if count != 1:
+        raise ValueError("Package release source context changed")
+    return data
+
+
+def package_patch(patch):
+    data = (HERE / "patches" / patch["file"]).read_bytes()
+    if hashlib.sha256(data).hexdigest() != patch["sha256"]:
+        raise ValueError("Package patch checksum differs from lock")
+    return data
+
+
+def apply_package_updates(tree, lock, source):
+    root = tree if source == "openwrt" else tree / "feeds" / source
+    for update in lock.get("package_updates", {}).values():
+        if update["source"] != source:
+            continue
+        run("git", "fetch", "--depth=1", "origin", update["commit"], cwd=root)
+        run("git", "restore", "--source=" + update["commit"], "--staged", "--worktree", "--", update["path"], cwd=root)
+        package = root / update["path"]
+        makefile = package / "Makefile"
+        makefile.write_bytes(updated_makefile(makefile.read_bytes(), update))
+        for patch in update.get("patches", []):
+            destination = package / "patches" / Path(patch["file"]).name
+            destination.parent.mkdir(exist_ok=True)
+            if destination.exists():
+                raise ValueError("Package patch would overwrite upstream content")
+            destination.write_bytes(package_patch(patch))
+
+
+def verify_package_updates(tree, lock):
+    """Check complete recipe contents, including removals and declared backports."""
+    for name, update in lock.get("package_updates", {}).items():
+        root = tree if update["source"] == "openwrt" else tree / "feeds" / update["source"]
+        package = root / update["path"]
+        listing = subprocess.check_output(
+            ["git", "ls-tree", "-r", update["commit"], "--", update["path"]], cwd=root, text=True)
+        expected = {}
+        for line in listing.splitlines():
+            metadata, path = line.split("\t", 1)
+            mode, kind, digest = metadata.split()
+            if kind != "blob" or mode not in ("100644", "100755"):
+                raise ValueError("Unsupported package recipe entry")
+            relative = Path(path).relative_to(update["path"]).as_posix()
+            expected[relative] = (mode, digest)
+        if "Makefile" not in expected:
+            raise ValueError("Pinned package recipe lacks a Makefile")
+        makefile = subprocess.check_output(["git", "show", update["commit"] + ":" + update["path"] + "/Makefile"], cwd=root)
+        additions = {"Makefile": updated_makefile(makefile, update)}
+        for patch in update.get("patches", []):
+            relative = "patches/" + Path(patch["file"]).name
+            if relative in expected:
+                raise ValueError("Package patch conflicts with upstream content")
+            additions[relative] = package_patch(patch)
+        for path, data in additions.items():
+            expected[path] = ("100644", hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest())
+        actual = {path.relative_to(package).as_posix(): path for path in package.rglob("*")
+                  if path.is_file() or path.is_symlink()}
+        if actual.keys() != expected.keys():
+            raise ValueError(f"Package recipe file set differs from lock: {name}")
+        for path, (mode, digest) in expected.items():
+            entry = actual[path]
+            if entry.is_symlink() or bool(entry.stat().st_mode & 0o111) != (mode == "100755"):
+                raise ValueError(f"Package recipe file mode differs from lock: {name}/{path}")
+            data = entry.read_bytes()
+            if hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() != digest:
+                raise ValueError(f"Package recipe content differs from lock: {name}/{path}")
+    return lock.get("package_updates", {})
+
+
+def validate_updated_packages(text, lock):
+    packages = dict(line.split(" - ", 1) for line in text.splitlines() if " - " in line)
+    for update in lock.get("package_updates", {}).values():
+        for package, version in update["packages"].items():
+            if packages.get(package) != version:
+                raise ValueError(f"Security update missing from manifest: {package} must be {version}")
 
 
 def validate_package_sources(tree):
@@ -88,6 +200,7 @@ def prepare(tree):
     image = tree / "target/linux/mediatek/image/filogic.mk"
     if "Device/sl_3000-emmc" in image.read_text():
         raise ValueError("Source tree already prepared; use a fresh checkout")
+    apply_package_updates(tree, lock, "openwrt")
     image.write_text(image.read_text() + (HERE / "image.mk").read_text())
     shutil.copy2(HERE / "files/mt7981b-sl-3000-emmc.dts", tree / "target/linux/mediatek/dts/")
     import nor_probe
@@ -134,6 +247,10 @@ def prepare(tree):
     for name, source in lock["feeds"].items():
         if revision(tree / "feeds" / name) != source["commit"]:
             raise ValueError(f"Feed commit mismatch: {name}")
+        apply_package_updates(tree, lock, name)
+        if any(update["source"] == name for update in lock.get("package_updates", {}).values()):
+            run("./scripts/feeds", "update", "-i", name, cwd=tree)
+    verify_package_updates(tree, lock)
     run("./scripts/feeds", "install", "-a", cwd=tree)
     # Only these proxy packages override the release feed; toolchain stays official.
     # -f only replaces core recipes, not an already installed feed recipe.

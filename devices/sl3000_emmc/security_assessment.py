@@ -85,6 +85,12 @@ def assess(github, lock, inventory, report):
     sources = {source["name"]: source for source in report["sources"]}
     advisory_fixes = {}
     included_commits = {}
+    updates = inventory.get("verified_package_updates", {})
+    if updates != lock.get("package_updates", {}):
+        raise ValueError("Package update provenance does not match the source lock")
+    for name, update in updates.items():
+        if name not in COMPONENTS or (update["source"], update["path"]) != COMPONENTS[name][:2]:
+            raise ValueError("Package update does not match the monitored component")
 
     def add(name, key, title, url, message, kind):
         identifiers = sorted(set(GHSA.findall(message)))
@@ -125,7 +131,8 @@ def assess(github, lock, inventory, report):
         if not selected:
             signal["assessment"] = "not_installed"
             continue
-        if any(path.startswith(paths) for path in inventory.get("source_overrides", {}).get(feed, [])):
+        update = updates.get(name)
+        if not update and any(path.startswith(paths) for path in inventory.get("source_overrides", {}).get(feed, [])):
             signal.update(assessment="needs_review", reason="Custom source changes require backport verification")
             continue
         excluded = scope_exclusion(sha, inventory)
@@ -135,6 +142,15 @@ def assess(github, lock, inventory, report):
         if repo != expected_repo:
             continue
         try:
+            if update:
+                status = "identical" if sha == update["commit"] else github.get(
+                    f"repos/{repo}/compare/{sha}...{update['commit']}")["status"]
+                if status in ("ahead", "identical"):
+                    signal["assessment"] = "fixed_in_inventory"
+                    continue
+                if status != "behind":
+                    signal.update(assessment="needs_review", reason="Package update and feed fix have diverged histories")
+                    continue
             change = github.get(f"repos/{repo}/commits/{sha}")
             message = change["commit"]["message"]
             if not SECURITY_FIX.search(message) or not any(
@@ -151,15 +167,17 @@ def assess(github, lock, inventory, report):
         if not upstream or not packages_for(name, inventory) or feed not in sources:
             continue
         source = sources[feed]
+        update = updates.get(name)
+        recipe_ref = update["commit"] if update else source["commit"]
         try:
-            if any(filename.startswith(path + "/") for filename in inventory.get("source_overrides", {}).get(feed, [])):
+            if not update and any(filename.startswith(path + "/") for filename in inventory.get("source_overrides", {}).get(feed, [])):
                 report.setdefault("assessment_notes", []).append(f"{name}: custom source changes require backport verification")
                 continue
-            makefile = content(github, source["repository"], path + "/Makefile", source["commit"])
+            makefile = content(github, source["repository"], path + "/Makefile", recipe_ref)
             pinned = re.search(r"^PKG_SOURCE_VERSION\s*:?=\s*([0-9a-f]{40})\s*$", makefile, re.M)
             if not pinned:
                 raise ValueError("Packaged component commit cannot be resolved")
-            entries = github.get(f"repos/{source['repository']}/contents/{path}?" + urlencode({"ref": source["commit"]}))
+            entries = github.get(f"repos/{source['repository']}/contents/{path}?" + urlencode({"ref": recipe_ref}))
             if any(entry["name"] == "patches" for entry in entries):
                 report.setdefault("assessment_notes", []).append(
                     f"{name}: local patch directory requires review before claiming an upstream fix is missing")
@@ -176,6 +194,8 @@ def assess(github, lock, inventory, report):
             if len(commits) != compared["total_commits"]:
                 raise ValueError("Component comparison is incomplete")
             for change in commits:
+                if update and change["sha"] in {patch["commit"] for patch in update.get("patches", [])}:
+                    continue
                 message = change["commit"]["message"]
                 title = message.splitlines()[0]
                 if title.startswith(("Merge ", "Revert ")) or not SECURITY_FIX.search(message):

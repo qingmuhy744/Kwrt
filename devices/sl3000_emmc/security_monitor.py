@@ -418,6 +418,7 @@ def render_report(report):
     lines += ["", "## 安全修复线索（待核实）", ""]
     for signal in report["security_signals"]:
         state = {"not_installed": "未安装", "scope_excluded": "功能范围已排除",
+                 "fixed_in_inventory": "构建版本已含修复",
                  "fix_pending": "需要纳入修复"}.get(signal.get("assessment"), "待核实，不推送")
         lines.append(f"- **{markdown(signal['component'])}** [{state}]：[{markdown(signal['title'])}]({signal['url']})")
     if not report["security_signals"]:
