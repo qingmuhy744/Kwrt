@@ -1,0 +1,85 @@
+name: SL-3000 Security Monitor
+
+on:
+  schedule:
+    # 09:17 Asia/Shanghai; Monday runs also deliver the weekly report.
+    - cron: '17 1 * * *'
+  workflow_dispatch:
+    inputs:
+      force_report:
+        description: Send a report even when no new alert is found
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sl3000-security-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    if: github.repository == 'qingmuhy744/Kwrt' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout monitor
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Test monitor behavior
+        run: python3 -m unittest discover -s devices/sl3000_emmc/tests -p test_security_monitor.py -v
+
+      - name: Restore notification state
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/sl3000-security-state
+          key: sl3000-security-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sl3000-security-v1-${{ github.ref_name }}-
+
+      - name: Check pinned sources and repository inactivity
+        id: scan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SL3000_DEPLOYED_RECIPE: ${{ vars.SL3000_DEPLOYED_RECIPE }}
+          FORCE_REPORT: ${{ inputs.force_report || false }}
+        run: |
+          args=()
+          if [[ "$FORCE_REPORT" == true ]]; then args+=(--force-report); fi
+          python3 devices/sl3000_emmc/security_monitor.py scan \
+            --state "$RUNNER_TEMP/sl3000-security-state/state.json" \
+            --output "$RUNNER_TEMP/sl3000-security-report" "${args[@]}"
+
+      - name: Notify Telegram and acknowledge delivered alerts
+        id: notify
+        if: ${{ !cancelled() && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') }}
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 devices/sl3000_emmc/security_monitor.py notify \
+            --state "$RUNNER_TEMP/sl3000-security-state/state.json" \
+            --output "$RUNNER_TEMP/sl3000-security-report"
+
+      - name: Save delivered notification state
+        if: ${{ !cancelled() && steps.notify.outputs.state_ready == 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/sl3000-security-state
+          key: sl3000-security-v1-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Preserve the public monitoring report
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sl3000-security-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sl3000-security-report/report.md
+            ${{ runner.temp }}/sl3000-security-report/report.json
+          retention-days: 30
+          if-no-files-found: error
