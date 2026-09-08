@@ -1,0 +1,66 @@
+name: Upload artifact with bounded retries
+description: Retry the pinned GitHub uploader twice after a failed upload
+inputs:
+  name:
+    description: Artifact name within this workflow run
+    required: true
+  path:
+    description: Validated files to upload
+    required: true
+  retention-days:
+    description: Artifact retention in days
+    default: '14'
+outputs:
+  artifact-url:
+    description: Download page for the completed artifact
+    value: ${{ steps.first.outputs.artifact-url || steps.second.outputs.artifact-url || steps.third.outputs.artifact-url }}
+runs:
+  using: composite
+  steps:
+    - name: Upload attempt 1 of 3
+      id: first
+      if: ${{ !cancelled() }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error
+        compression-level: 0
+        overwrite: true
+
+    - name: Wait before second attempt
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      shell: bash
+      run: sleep 20
+
+    - name: Upload attempt 2 of 3
+      id: second
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error
+        compression-level: 0
+        overwrite: true
+
+    - name: Wait before final attempt
+      if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      shell: bash
+      run: sleep 60
+
+    - name: Upload attempt 3 of 3
+      id: third
+      if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error
+        compression-level: 0
+        overwrite: true

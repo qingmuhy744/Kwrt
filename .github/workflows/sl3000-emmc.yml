@@ -31,6 +31,10 @@ on:
         description: Optional baseline run ID for compile-time comparison (queue time excluded)
         type: string
         default: ''
+      telegram_artifacts:
+        description: Send verified outputs to Telegram, split into files of at most 45 MiB
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -72,11 +76,17 @@ jobs:
           REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
           PUBLIC_SETUP_PASSWORD: ${{ inputs.public_setup_password }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          SEND_TELEGRAM: ${{ inputs.telegram_artifacts }}
+          TELEGRAM_CONFIGURED: ${{ secrets.TELEGRAM_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
           SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
           SL3000_RF_TEST_PASSPHRASE: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_PASSPHRASE || '' }}
         run: |
           if [[ "$REPOSITORY_PRIVATE" != true && "$PUBLIC_SETUP_PASSWORD" != true ]]; then
             echo 'Public images expose their Wi-Fi password. Confirm use of a public temporary password.'
+            exit 1
+          fi
+          if [[ "$SEND_TELEGRAM" == true && "$TELEGRAM_CONFIGURED" != true ]]; then
+            echo 'Telegram delivery requires TELEGRAM_TOKEN and TELEGRAM_CHAT_ID secrets.'
             exit 1
           fi
           python3 "$RECIPE/rf_test.py" preflight --publish-release "$PUBLISH_RELEASE"
@@ -240,6 +250,7 @@ jobs:
           key: ${{ steps.cache_keys.outputs.compiler_key }}
 
       - name: Verify and collect only approved outputs
+        id: verify_artifacts
         env:
           DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
           SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
@@ -248,49 +259,69 @@ jobs:
           cd "$RUNNER_TEMP/sl3000-release"
           sha256sum -c sha256sums
 
-      - name: Upload verified firmware
-        if: ${{ !inputs.rf_test }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sl3000-emmc-${{ inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}
-          path: ${{ runner.temp }}/sl3000-release/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
       - name: Collect public security inventory
+        id: inventory
         if: ${{ !inputs.rf_test }}
         run: python3 "$RECIPE/security_inventory.py" "$RUNNER_TEMP/sl3000-release" --openwrt "$OPENWRT" --output "$RUNNER_TEMP/security-inventory.json"
 
-      - name: Upload public security inventory
-        if: ${{ !inputs.rf_test }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sl3000-security-inventory-${{ github.run_id }}
-          path: ${{ runner.temp }}/security-inventory.json
-          if-no-files-found: error
-          retention-days: 90
-
       - name: Encrypt device-specific RF test artifacts
+        id: encrypt_artifacts
         if: ${{ inputs.rf_test }}
         env:
           SL3000_RF_TEST_PASSPHRASE: ${{ secrets.SL3000_RF_TEST_PASSPHRASE }}
         run: python3 "$RECIPE/rf_test.py" encrypt "$RUNNER_TEMP/sl3000-release" "$RUNNER_TEMP/sl3000-encrypted"
 
-      - name: Upload encrypted RF test firmware only
-        if: ${{ inputs.rf_test }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Upload verified firmware with retries
+        id: firmware_upload
+        if: ${{ !cancelled() && steps.verify_artifacts.outcome == 'success' && (!inputs.rf_test || steps.encrypt_artifacts.outcome == 'success') }}
+        timeout-minutes: 45
+        uses: ./.github/actions/upload-artifact-retry
         with:
-          name: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe' || 'rf-test' }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/sl3000-encrypted/*
-          if-no-files-found: error
-          compression-level: 0
+          name: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}
+          path: ${{ runner.temp }}/${{ inputs.rf_test && 'sl3000-encrypted' || 'sl3000-release' }}/*
           retention-days: 14
 
+      - name: Upload public security inventory with retries
+        if: ${{ !cancelled() && !inputs.rf_test && steps.inventory.outcome == 'success' }}
+        timeout-minutes: 45
+        uses: ./.github/actions/upload-artifact-retry
+        with:
+          name: sl3000-security-inventory-${{ github.run_id }}
+          path: ${{ runner.temp }}/security-inventory.json
+          retention-days: 90
+
+      - name: Send verified artifacts to Telegram
+        id: telegram_delivery
+        if: ${{ !cancelled() && inputs.telegram_artifacts && steps.verify_artifacts.outcome == 'success' && (!inputs.rf_test || steps.encrypt_artifacts.outcome == 'success') }}
+        continue-on-error: true
+        timeout-minutes: 45
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FIRMWARE_UPLOAD_STATUS: ${{ steps.firmware_upload.outcome }}
+          FIRMWARE_ARTIFACT_URL: ${{ steps.firmware_upload.outputs.artifact-url }}
+          ARTIFACT_NAME: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}-attempt-${{ github.run_attempt }}
+        run: |
+          source="$RUNNER_TEMP/sl3000-release"
+          args=()
+          if [[ "$SL3000_RF_TEST" == true ]]; then
+            source="$RUNNER_TEMP/sl3000-encrypted"
+            args+=(--encrypted)
+          fi
+          python3 "$RECIPE/ci_telegram.py" "$source" \
+            --output "$RUNNER_TEMP/sl3000-telegram" --name "$ARTIFACT_NAME" "${args[@]}"
+
       - name: Build summary
+        if: ${{ !cancelled() && steps.verify_artifacts.outcome == 'success' }}
+        env:
+          FIRMWARE_UPLOAD_STATUS: ${{ steps.firmware_upload.outcome }}
+          TELEGRAM_DELIVERY_STATUS: ${{ steps.telegram_delivery.outcome }}
         run: |
           {
             echo '### SL-3000 eMMC'
+            echo "GitHub firmware upload: $FIRMWARE_UPLOAD_STATUS"
+            echo "Telegram artifact delivery: $TELEGRAM_DELIVERY_STATUS"
             echo 'OpenWrt 25.12.5, pinned feeds and proxy components.'
             echo 'Ruby/YAML retained; optional Ruby YJIT disabled; no Rust host toolchain built.'
             echo 'Image checks passed. Hardware acceptance is still required.'

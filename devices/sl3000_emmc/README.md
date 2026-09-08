@@ -51,7 +51,11 @@ PassWall 的系统服务保留启用，以便 LuCI 的“保存并应用”能�
 
 上述不选测试模式的构建仍是旧的通用 EEPROM bootstrap。要测试本机 Factory 读取，请按下面的公共测试选项触发，避免误下载旧模式。
 
-产物只包括设备 sysupgrade、initramfs FIT、包清单、OpenWrt/kernel 配置、来源锁定清单、构建信息和 SHA-256。不会上传完整构建目录、注入密码的脚本或未筛选的 `bin/targets` 目录。失败构建不发布镜像。
+产物只包括设备 sysupgrade、initramfs FIT、包清单、OpenWrt/kernel 配置、来源锁定清单、构建信息和 SHA-256。不会上传完整构建目录、注入密码的脚本或未筛选的 `bin/targets` 目录。编译或镜像校验失败时不发送镜像。
+
+GitHub 固件附件与公共安全清单的上传各最多尝试 3 次，两次重试前分别等待 20 秒、60 秒；重试覆盖本次运行的同名附件，全部失败仍标记任务失败。GitHub 上传失败不阻止已通过镜像校验的产物继续发送到 Telegram。
+
+`telegram_artifacts` 默认开启，复用 `TELEGRAM_TOKEN`、`TELEGRAM_CHAT_ID` 两个仓库 Secret；不需要 TG 副本时可在手动运行中关闭。普通 Bot API 的单文件上限是 50 MB，产物会打成 ZIP，超过 45 MiB 时按顺序分卷发送，并附 `SHA256SUMS.txt` 和 `RESTORE.txt`。下载全部分卷后按说明合并、解压，再验证包内 `sha256sums`，不能直接刷入 ZIP 或分卷。私有 RF/NOR 模式只发送已加密的归档和密文校验值。单个 TG 文件遇到网络错误、429 或服务端错误时最多尝试 3 次；TG 失败会在构建摘要中单独标出，不影响已保存的 GitHub 附件及有效安全清单。
 
 所有来源见 `sources.lock.json`，官方 feeds 与 25.12.5 发布的 `feeds.buildinfo` 一致。第三方插件也按 commit 固定；Mihomo 使用上游发布的压缩二进制并验证 SHA-256。升级这些来源需要显式修改锁文件及相应包配方后重跑验证。固定源码不代表比特级可重复，也不能替代安全更新。
 
