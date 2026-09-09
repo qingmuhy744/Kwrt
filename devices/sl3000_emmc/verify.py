@@ -22,6 +22,7 @@ REQUIRED_PACKAGES = (
     "mihomo", "xray-core", "sing-box", "chinadns-ng", "dns2socks", "ipt2socks",
     "kmod-nft-socket", "kmod-nft-tproxy", "kmod-nft-nat", "kmod-tun",
     "luci-app-upnp", "miniupnpd-nftables", "luci-app-wol", "etherwake",
+    "vnstat2", "vnstati2", "luci-app-vnstat2", "luci-i18n-vnstat2-zh-cn",
     "kmod-mt7915e", "kmod-mt7981-firmware", "mt7981-wo-firmware",
     "sl3000-default-eeprom", "kmod-mmc", "kmod-usb3", "kmod-fs-ext4",
     "kmod-fs-f2fs", "block-mount", "f2fsck", "mkf2fs", "ca-bundle", "ip-full",
@@ -129,6 +130,10 @@ def verify_rootfs(image, scratch, password):
     with tarfile.open(image) as archive, root.open("wb") as stream:
         shutil.copyfileobj(archive.extractfile(f"sysupgrade-{PROFILE}/root"), stream)
     validate_network_files(lambda name: root_file(root, name))
+    from prepare import VNSTAT_FILES
+    for source, destination in VNSTAT_FILES:
+        if root_file(root, destination) != (HERE / "files" / source).read_bytes():
+            raise ValueError(f"SL-3000 vnStat configuration missing or changed: {destination}")
     expected = (HERE / "firstboot.sh").read_text().replace("# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(password)).encode()
     if root_file(root, "etc/uci-defaults/99-sl3000-setup") != expected:
         raise ValueError("Firstboot settings are missing or differ from the validated template")

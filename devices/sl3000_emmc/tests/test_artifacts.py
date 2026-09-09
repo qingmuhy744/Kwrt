@@ -21,6 +21,7 @@ from test_rf_test import fixture, private_env
 from test_network import network_files
 from test_hardening import acl_fixture
 import hardening
+from prepare import VNSTAT_FILES
 
 IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
 INITRAMFS_NAME = f"{IMAGE_PREFIX}-initramfs.itb"
@@ -228,6 +229,7 @@ class RootfsRFTests(unittest.TestCase):
             core[18:20] = b"\xb7\x00"
             files = {
                 **network_files(),
+                **{destination: (ROOT / "files" / source).read_bytes() for source, destination in VNSTAT_FILES},
                 hardening.ACL_PATH: json.dumps(acl_fixture()).encode(),
                 "etc/uci-defaults/99-sl3000-setup": (ROOT / "firstboot.sh").read_text().replace(
                     "# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(PASSWORD)).encode(),

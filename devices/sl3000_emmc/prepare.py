@@ -11,6 +11,11 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent
 PROXY_PACKAGES = ("chinadns-ng", "dns2socks", "ipt2socks", "microsocks", "tcping", "sing-box", "xray-core")
+VNSTAT_FILES = (
+    ("vnstat.conf", "etc/vnstat.conf"),
+    ("vnstat.config", "etc/config/vnstat"),
+    ("vnstat.keep", "lib/upgrade/keep.d/sl3000-vnstat"),
+)
 
 
 def validate_lock(lock):
@@ -207,6 +212,20 @@ def prepare_network(base):
         path.chmod(0o755 if source != "sl3000-ports.uc" else 0o644)
 
 
+def prepare_vnstat(tree):
+    # The rootfs overlay is applied after package installation. On later
+    # sysupgrades, OpenWrt restores the owner's saved vnStat configuration.
+    overlay = tree / "files"
+    for source, destination in VNSTAT_FILES:
+        path = overlay / destination
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(HERE / "files" / source, path)
+        path.chmod(0o600 if destination.startswith("etc/") else 0o644)
+    database = overlay / "etc/vnstat"
+    database.mkdir(parents=True, exist_ok=True)
+    database.chmod(0o700)
+
+
 def prepare(tree):
     import factory_test
     factory_test.preflight()
@@ -286,6 +305,7 @@ def prepare(tree):
     run("./scripts/feeds", "uninstall", *PROXY_PACKAGES, cwd=tree)
     run("./scripts/feeds", "install", "-p", "passwall_packages", *PROXY_PACKAGES, cwd=tree)
     validate_package_sources(tree)
+    prepare_vnstat(tree)
     run("./scripts/feeds", "install", "-f", "-p", "passwall", "luci-app-passwall", cwd=tree)
     run("./scripts/feeds", "install", "-f", "-p", "openclash", "luci-app-openclash", cwd=tree)
     shutil.copy2(HERE / ".config", tree / ".config")
