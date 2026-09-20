@@ -201,6 +201,7 @@ jobs:
           export SL3000_TEST_UCODE="$RUNNER_TEMP/sl3000-network-tools/install/bin/ucode"
           export SL3000_TEST_OPENWRT="$OPENWRT"
           python3 -m unittest discover -s "$RECIPE/tests" -p 'test_network.py' -v
+          python3 -m unittest discover -s "$RECIPE/tests" -p 'test_apsta_recovery.py' -v
 
       - name: Select build parallelism and reset cache statistics
         id: resources

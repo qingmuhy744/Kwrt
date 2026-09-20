@@ -15,6 +15,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 BOARD = "sl,3000-emmc"
 PROFILE = "sl_3000-emmc"
+APSTA_RECOVERY_MARKER = b"SL3000 AP+STA: reset clients before AP stop"
 REQUIRED_PACKAGES = (
     "ucode", "ucode-mod-fs", "ucode-mod-uci",
     "luci", "luci-ssl", "dnsmasq-full", "firewall4", "tailscale",
@@ -144,6 +145,8 @@ def verify_rootfs(image, scratch, password):
     lock = json.loads((HERE / "sources.lock.json").read_text())
     import hardening
     hardening.verify(lambda name: root_file(root, name), lock)
+    if APSTA_RECOVERY_MARKER not in root_file(root, "usr/sbin/wpad"):
+        raise ValueError("AP+STA client recovery fix missing from wpad")
     import rf_test
     if rf_test.enabled():
         expected_eeprom = rf_test.calibration()

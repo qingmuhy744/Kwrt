@@ -253,7 +253,7 @@ def assess(github, lock, inventory, report, policy=None):
             if len(commits) != compared["total_commits"]:
                 raise ValueError("Component comparison is incomplete")
             for change in commits:
-                if update and change["sha"] in {patch["commit"] for patch in update.get("patches", [])}:
+                if update and change["sha"] in {patch.get("commit") for patch in update.get("patches", [])}:
                     continue
                 message = change["commit"]["message"]
                 title = message.splitlines()[0]

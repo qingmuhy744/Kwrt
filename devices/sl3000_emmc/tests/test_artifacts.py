@@ -234,6 +234,7 @@ class RootfsRFTests(unittest.TestCase):
                 "etc/uci-defaults/99-sl3000-setup": (ROOT / "firstboot.sh").read_text().replace(
                     "# WIFI_PASSWORD_INJECTED_HERE", shell_assignment(PASSWORD)).encode(),
                 "etc/openclash/core/clash_meta": bytes(core),
+                "usr/sbin/wpad": b"\x7fELF" + verify.APSTA_RECOVERY_MARKER,
                 rf_test.FIRMWARE_PATH: fixture(),
                 rf_test.MARKER_PATH: rf_test.marker(fixture()),
                 "etc/shadow": b"root::0:0:99999:7:::\n",
@@ -242,6 +243,10 @@ class RootfsRFTests(unittest.TestCase):
                     patch.object(verify, "root_file", side_effect=lambda _, name: files[name]), \
                     patch.object(verify.subprocess, "check_output", return_value=""):
                 verify.verify_rootfs(image, scratch, PASSWORD)
+                files["usr/sbin/wpad"] = b"\x7fELFold-wpad"
+                with self.assertRaisesRegex(ValueError, "client recovery fix missing"):
+                    verify.verify_rootfs(image, scratch, PASSWORD)
+                files["usr/sbin/wpad"] = b"\x7fELF" + verify.APSTA_RECOVERY_MARKER
                 files[rf_test.FIRMWARE_PATH] = b"\0" * rf_test.SIZE
                 with self.assertRaisesRegex(ValueError, "not embedded exactly"):
                     verify.verify_rootfs(image, scratch, PASSWORD)

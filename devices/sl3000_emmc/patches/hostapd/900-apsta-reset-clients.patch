@@ -1,0 +1,34 @@
+Subject: [PATCH] hostapd: clear client state before stopping AP for STA reconnect
+
+Local SL3000 fix against the pinned OpenWrt hostapd ucode extension.
+mac80211 clears its stations on stop_ap, but the ucode stop/start path
+retains hostapd's associated and authorized clients. After STA recovery
+those clients can remain unusable until inactivity cleanup or reconnect.
+
+Send per-client deauthentication while their keys still exist, then
+clear hostapd's station state before stopping the AP. Do not change PMF,
+rekeying, channel selection, or the STA reconnection state machine.
+
+--- a/src/ap/ucode.c
++++ b/src/ap/ucode.c
+@@ -590,7 +590,19 @@
+ 
+ 	for (i = 0; i < iface->num_bss; i++) {
+ 		struct hostapd_data *hapd = iface->bss[i];
+-
++		struct sta_info *sta;
++
++		/* mac80211 stop_ap flushes its station table. Drop the matching
++		 * userspace state as well, and notify clients before their keys
++		 * are removed so that protected deauthentication is possible.
++		 */
++		if (hapd->sta_list)
++			wpa_printf(MSG_INFO,
++				   "SL3000 AP+STA: reset clients before AP stop");
++		for (sta = hapd->sta_list; sta; sta = sta->next)
++			hostapd_drv_sta_deauth(hapd, sta->addr,
++					    WLAN_REASON_DEAUTH_LEAVING);
++		hostapd_free_stas(hapd);
+ 		hostapd_drv_stop_ap(hapd);
+ 		hapd->beacon_set_done = 0;
+ 	}

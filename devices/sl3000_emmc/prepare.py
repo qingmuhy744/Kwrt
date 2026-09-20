@@ -63,8 +63,13 @@ def validate_lock(lock):
             if patch["file"] in patch_names:
                 raise ValueError("Duplicate package patch")
             patch_names.add(patch["file"])
-            if not re.fullmatch(r"[0-9a-f]{40}", patch["commit"]) or not re.fullmatch(r"[0-9a-f]{64}", patch["sha256"]):
-                raise ValueError("Package patches must pin their upstream commit and checksum")
+            if not re.fullmatch(r"[0-9a-f]{64}", patch.get("sha256", "")):
+                raise ValueError("Package patches must pin their checksum")
+            if patch.get("origin", "upstream") == "upstream":
+                if not re.fullmatch(r"[0-9a-f]{40}", patch.get("commit", "")):
+                    raise ValueError("Upstream package patches must pin their commit")
+            elif patch.get("origin") != "local" or "commit" in patch:
+                raise ValueError("Local package patches must not claim an upstream commit")
     from hardening import FIXES
     if not isinstance(lock.get("hardening", []), list) or any(item not in FIXES for item in lock.get("hardening", [])):
         raise ValueError("Unsupported firmware hardening fix")

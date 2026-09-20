@@ -89,6 +89,20 @@ class PackageUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             self.apply()
 
+    def test_local_patch_has_checksum_without_claiming_an_upstream_fix(self):
+        entry = self.lock["package_updates"]["uhttpd"]["patches"][0]
+        entry.pop("commit")
+        entry["origin"] = "local"
+        self.apply()
+        prepare.verify_package_updates(self.tree, self.lock)
+        entry["commit"] = "a" * 40
+        with self.assertRaisesRegex(ValueError, "must not claim"):
+            prepare.validate_lock(self.lock)
+        entry.pop("commit")
+        entry["sha256"] = ""
+        with self.assertRaisesRegex(ValueError, "checksum"):
+            prepare.validate_lock(self.lock)
+
     def test_old_or_missing_module_versions_are_rejected(self):
         manifest = "uhttpd - 2.0-r2\nuhttpd-mod-ubus - 2.0-r2\n"
         prepare.validate_updated_packages(manifest, self.lock)

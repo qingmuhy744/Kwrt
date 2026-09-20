@@ -222,7 +222,7 @@ class AssessmentTests(unittest.TestCase):
 
     def test_verified_package_update_uses_new_recipe_and_skips_only_declared_backport(self):
         update = {"source": "openwrt", "path": "package/network/services/uhttpd", "commit": "e" * 40,
-                  "patches": [{"commit": "d" * 40}]}
+                  "patches": [{"commit": "d" * 40}, {"origin": "local", "sha256": "a" * 64}]}
         lock = {**LOCK, "package_updates": {"uhttpd": update}}
         data = baseline()
         data["verified_package_updates"] = lock["package_updates"]

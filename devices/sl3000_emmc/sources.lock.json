@@ -72,6 +72,32 @@
       "path": "libs/nghttp2",
       "commit": "fc8b2fec0ba9bcda54c0cbb2968a33f6b4637006",
       "packages": {"libnghttp2-14": "1.70.0-r1"}
+    },
+    "bind": {
+      "source": "packages",
+      "path": "net/bind",
+      "commit": "12a3ceaad155453e7355c9f4ec91ec3145979304",
+      "packages": {
+        "bind-dig": "9.20.29-r1",
+        "bind-libs": "9.20.29-r1"
+      }
+    },
+    "hostapd": {
+      "source": "openwrt",
+      "path": "package/network/services/hostapd",
+      "commit": "f0a60eee2fe051741c643ea6118718aae1ef17fb",
+      "release": "2",
+      "packages": {
+        "hostapd-common": "2025.08.26~ca266cc2-r2",
+        "wpad-basic-mbedtls": "2025.08.26~ca266cc2-r2"
+      },
+      "patches": [
+        {
+          "file": "hostapd/900-apsta-reset-clients.patch",
+          "origin": "local",
+          "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"
+        }
+      ]
     }
   },
   "mihomo": {
