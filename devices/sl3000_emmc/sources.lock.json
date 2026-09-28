@@ -82,6 +82,59 @@
         "bind-libs": "9.20.29-r1"
       }
     },
+    "curl": {
+      "source": "packages",
+      "path": "net/curl",
+      "commit": "d8488f46b08db0467bb9c081fba79e1b2e9c43ac",
+      "version": "8.22.0",
+      "sha256": "f7ef3ae8a22e521f289803fe93543eb64c329b58aa73a9e224dfd915a2a5f4f7",
+      "packages": {
+        "curl": "8.22.0-r1",
+        "libcurl4": "8.22.0-r1"
+      }
+    },
+    "openssl": {
+      "source": "openwrt",
+      "path": "package/libs/openssl",
+      "commit": "c9e33c746791190e2925227d11302bc8e454cd0c",
+      "packages": {
+        "libopenssl3": "3.5.8-r2"
+      }
+    },
+    "ubus": {
+      "source": "openwrt",
+      "path": "package/system/ubus",
+      "commit": "7673104ad53dd0095ec54ecce47f0f5758991f5e",
+      "release": "3",
+      "packages": {
+        "libubus-lua": "2026.06.28~24864e78-r3",
+        "libubus20251202": "2026.06.28~24864e78-r3",
+        "ubus": "2026.06.28~24864e78-r3",
+        "ubusd": "2026.06.28~24864e78-r3"
+      },
+      "patches": [
+        {
+          "file": "ubus/001-fuzz-header-validation.patch",
+          "commit": "3930745d8593bb9dffb3d0755affcdefb37585e9",
+          "sha256": "1aa0d372b9bafd45f3c66164435c16e40a9b81b1e4e774f15304f3d127738b4a"
+        },
+        {
+          "file": "ubus/002-event-reserved-prefix.patch",
+          "commit": "5331c00f37f7d2cbaa2646ebc3734a7959494b18",
+          "sha256": "d4da6b5061acb4573df534290fb2b6f192f0f23db9c7dbaa907f8e69d1020e8f"
+        },
+        {
+          "file": "ubus/003-lookup-uaf.patch",
+          "commit": "955ff3f7030c26d133597a2b1cbe46758a5443e4",
+          "sha256": "51c60b820540534cf220b9aad60569707cc73d35b406c345f8e22c83190c048f"
+        },
+        {
+          "file": "ubus/004-acl-filename.patch",
+          "commit": "bde609c2400e06f18986c359db87831732316a99",
+          "sha256": "4aa0c65d3e5805c69842a4ceb5d804944832e0462b071d1f8d44e6c63dee2145"
+        }
+      ]
+    },
     "hostapd": {
       "source": "openwrt",
       "path": "package/network/services/hostapd",

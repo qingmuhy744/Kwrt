@@ -1,0 +1,128 @@
+From 955ff3f7030c26d133597a2b1cbe46758a5443e4 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Thu, 9 Jul 2026 21:46:33 +0200
+Subject: [PATCH] ubusd: fix use-after-free when resuming a queued object
+ lookup
+
+An object-enumeration lookup (LOOKUP without an object path) streams the
+global path tree back to the client. When the client's socket buffer
+fills mid-enumeration, the resume position was stored as a raw
+struct ubus_object pointer in the per-client command queue and later
+dereferenced in __ubusd_handle_lookup().
+
+Because ubusd is a single event loop, another client can remove that
+object, or disconnect and have all of its objects freed, between queuing
+and resuming. The stored pointer then dangles and the resume walks freed
+memory, a use-after-free reachable by an unprivileged local client that
+stops reading while objects churn.
+
+Remember the resume position by path key and re-find it with
+avl_find_ge_element() on resume, which tolerates the object having been
+removed. Also guard the fresh-start path against an empty tree, since
+avl_first_element() must not be called on one.
+
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ ubusd.h       |  2 +-
+ ubusd_main.c  |  1 +
+ ubusd_proto.c | 46 ++++++++++++++++++++++++++++++++--------------
+ 3 files changed, 34 insertions(+), 15 deletions(-)
+
+diff --git a/ubusd.h b/ubusd.h
+index a8348a3..b9febac 100644
+--- a/ubusd.h
++++ b/ubusd.h
+@@ -45,7 +45,7 @@ struct ubus_msg_buf_list {
+ struct ubus_client_cmd {
+ 	struct list_head list;
+ 	struct ubus_msg_buf *msg;
+-	struct ubus_object *obj;
++	char *lookup_path;
+ };
+ 
+ struct ubus_client {
+diff --git a/ubusd_main.c b/ubusd_main.c
+index 1909973..a3f0474 100644
+--- a/ubusd_main.c
++++ b/ubusd_main.c
+@@ -48,6 +48,7 @@ static void ubus_client_cmd_free(struct ubus_client_cmd *cmd)
+ {
+ 	list_del(&cmd->list);
+ 	ubus_msg_free(cmd->msg);
++	free(cmd->lookup_path);
+ 	free(cmd);
+ }
+ 
+diff --git a/ubusd_proto.c b/ubusd_proto.c
+index cf955da..19a1d05 100644
+--- a/ubusd_proto.c
++++ b/ubusd_proto.c
+@@ -190,15 +190,27 @@ static int ubus_client_cmd_queue_add(struct ubus_client *cl,
+ 					struct ubus_msg_buf *msg,
+ 					struct ubus_object *obj)
+ {
+-	struct ubus_client_cmd *cmd = malloc(sizeof(*cmd));
+-
+-	if (cmd) {
+-		cmd->msg = msg;
+-		cmd->obj = obj;
+-		list_add_tail(&cmd->list, &cl->cmd_queue);
+-		return -2;
++	struct ubus_client_cmd *cmd = calloc(1, sizeof(*cmd));
++
++	if (!cmd)
++		return UBUS_STATUS_UNKNOWN_ERROR;
++
++	/*
++	 * Remember the resume position by path key rather than object pointer.
++	 * The object may be freed (client disconnect or removal) before the
++	 * queued lookup is resumed; a stored pointer would then dangle.
++	 */
++	if (obj) {
++		cmd->lookup_path = strdup(obj->path.key);
++		if (!cmd->lookup_path) {
++			free(cmd);
++			return UBUS_STATUS_UNKNOWN_ERROR;
++		}
+ 	}
+-	return UBUS_STATUS_UNKNOWN_ERROR;
++
++	cmd->msg = msg;
++	list_add_tail(&cmd->list, &cl->cmd_queue);
++	return -2;
+ }
+ 
+ static int __ubusd_handle_lookup(struct ubus_client *cl,
+@@ -212,12 +224,17 @@ static int __ubusd_handle_lookup(struct ubus_client *cl,
+ 	size_t len;
+ 
+ 	if (!attr[UBUS_ATTR_OBJPATH]) {
+-		if (cmd)
+-			obj = cmd->obj;
+-
+-		/* Start from beginning or continue from the last object */
+-		if (obj == NULL)
++		/* Start from beginning or continue from the last position */
++		if (cmd && cmd->lookup_path) {
++			/* resume at or after the stored key, skipping freed objects */
++			obj = avl_find_ge_element(&path, cmd->lookup_path, obj, path);
++			if (!obj)
++				return 0;
++		} else {
++			if (avl_is_empty(&path))
++				return 0;
+ 			obj = avl_first_element(&path, obj, path);
++		}
+ 
+ 		avl_for_element_range(obj, avl_last_element(&path, obj, path), obj, path) {
+ 			/* Keep sending objects until buffering starts */
+@@ -230,7 +247,8 @@ static int __ubusd_handle_lookup(struct ubus_client *cl,
+ 				if (cmd == NULL) {
+ 					ret = ubus_client_cmd_queue_add(cl, ub, obj);
+ 				} else {
+-					cmd->obj = obj;
++					free(cmd->lookup_path);
++					cmd->lookup_path = strdup(obj->path.key);
+ 					ret = -2;
+ 				}
+ 				return ret;

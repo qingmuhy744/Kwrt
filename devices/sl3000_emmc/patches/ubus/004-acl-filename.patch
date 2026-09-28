@@ -1,0 +1,60 @@
+From bde609c2400e06f18986c359db87831732316a99 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Fri, 10 Jul 2026 08:16:08 +0200
+Subject: [PATCH] ubusd_acl: copy the filename used as the ACL file vlist key
+
+ubusd_acl_load_file() keyed the vlist node with the filename pointer
+it was given, which points into the glob result that ubusd_acl_load()
+frees before returning. The keys of all loaded files therefore dangled
+until the next reload, where vlist_add() runs avl_find() and strcmp()
+against the freed strings: a heap use-after-free on every SIGHUP ACL
+reload. Whether the reload behaves correctly then depends on the
+allocator having left the old strings intact; with a hardened or
+debugging allocator ubusd aborts.
+
+Reproduced under AddressSanitizer: the first SIGHUP after startup
+faults in strcmp via vlist_add from ubusd_acl_load_file. Embed a copy
+of the filename in the file allocation and use that as the key; seven
+consecutive reloads including file addition and removal now pass
+cleanly.
+
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ ubusd_acl.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/ubusd_acl.c b/ubusd_acl.c
+index 283f7df..0eb8b36 100644
+--- a/ubusd_acl.c
++++ b/ubusd_acl.c
+@@ -522,6 +522,7 @@ ubusd_acl_load_file(const char *filename)
+ {
+ 	struct ubusd_acl_file *file;
+ 	void *blob;
++	char *name;
+ 
+ 	blob_buf_init(&bbuf, 0);
+ 	if (!blobmsg_add_json_from_file(&bbuf, filename)) {
+@@ -529,7 +530,12 @@ ubusd_acl_load_file(const char *filename)
+ 		return -1;
+ 	}
+ 
+-	file = calloc_a(sizeof(*file), &blob, blob_raw_len(bbuf.head));
++	/*
++	 * The vlist key must stay valid for the node's lifetime; filename
++	 * points into the glob result freed by the caller, so keep a copy.
++	 */
++	file = calloc_a(sizeof(*file), &blob, blob_raw_len(bbuf.head),
++			&name, strlen(filename) + 1);
+ 	if (!file)
+ 		return -1;
+ 
+@@ -538,7 +544,7 @@ ubusd_acl_load_file(const char *filename)
+ 	memcpy(blob, bbuf.head, blob_raw_len(bbuf.head));
+ 	INIT_LIST_HEAD(&file->acl);
+ 
+-	vlist_add(&ubusd_acl_files, &file->avl, filename);
++	vlist_add(&ubusd_acl_files, &file->avl, strcpy(name, filename));
+ 	syslog(LOG_INFO, "loading %s\n", filename);
+ 
+ 	return 0;

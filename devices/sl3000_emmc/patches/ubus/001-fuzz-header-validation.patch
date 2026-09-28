@@ -1,0 +1,34 @@
+From 3930745d8593bb9dffb3d0755affcdefb37585e9 Mon Sep 17 00:00:00 2001
+From: Felix Fietkau <nbd@nbd.name>
+Date: Fri, 17 Jul 2026 21:44:24 +0200
+Subject: [PATCH] tests/fuzz: fix out-of-bounds read in header validation
+ harness
+
+_ubus_validate_hdr() passed the input straight to ubus_validate_hdr()
+whenever size was not greater than sizeof(struct ubus_msghdr). That
+condition is backwards and too small: ubus_validate_hdr() dereferences
+the struct blob_attr located immediately after the header, so the
+harness needs at least sizeof(ubus_msghdr) + sizeof(blob_attr) bytes.
+An 8-byte input (exactly the header size) reached the validator and
+read blob_raw_len() one blob_attr past the end of the buffer.
+
+Require the full header plus the trailing blob_attr before validating.
+
+Signed-off-by: Felix Fietkau <nbd@nbd.name>
+---
+ tests/fuzz/test-fuzz.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tests/fuzz/test-fuzz.c b/tests/fuzz/test-fuzz.c
+index 7a7a1eb..6001b08 100644
+--- a/tests/fuzz/test-fuzz.c
++++ b/tests/fuzz/test-fuzz.c
+@@ -12,7 +12,7 @@
+ 
+ static void _ubus_validate_hdr(const uint8_t *data, size_t size)
+ {
+-	if (size > sizeof(struct ubus_msghdr))
++	if (size < sizeof(struct ubus_msghdr) + sizeof(struct blob_attr))
+ 		return;
+ 
+ 	ubus_validate_hdr((struct ubus_msghdr *) data);
