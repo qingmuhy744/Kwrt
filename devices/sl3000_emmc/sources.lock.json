@@ -36,12 +36,16 @@
       "source": "openwrt",
       "path": "package/network/services/uhttpd",
       "commit": "80de19ea3b6e34dd60c9e0f76f5b3a781331822d",
-      "release": "2",
-      "packages": {"uhttpd": "2026.08.03~60f64bec-r2", "uhttpd-mod-ubus": "2026.08.03~60f64bec-r2"},
+      "release": "3",
+      "packages": {"uhttpd": "2026.08.03~60f64bec-r3", "uhttpd-mod-ubus": "2026.08.03~60f64bec-r3"},
       "patches": [{
         "file": "uhttpd/900-basic-auth-prefix.patch",
         "commit": "3aa7e1c7678281220470e24784bcdcfb71bda6cf",
         "sha256": "187fc38fca54edc854b3b7dfc2547533cbd01044213a0b7c634601a936d4205e"
+      }, {
+        "file": "uhttpd/901-ubus-list-params.patch",
+        "commit": "64dcf47aa7f84ae60db9a3950e5c4b8fbe5ed6f1",
+        "sha256": "caec0b216565af30f51440fc48bee3603b1a39fd94cac32c13a04cd4253496f2"
       }]
     },
     "rpcd": {
@@ -96,9 +100,9 @@
     "openssl": {
       "source": "openwrt",
       "path": "package/libs/openssl",
-      "commit": "c9e33c746791190e2925227d11302bc8e454cd0c",
+      "commit": "e594c1dbf3a14eab325e8b101eb7bbb16e43aeab",
       "packages": {
-        "libopenssl3": "3.5.8-r2"
+        "libopenssl3": "3.5.9-r1"
       }
     },
     "ubus": {

@@ -1,0 +1,91 @@
+From 64dcf47aa7f84ae60db9a3950e5c4b8fbe5ed6f1 Mon Sep 17 00:00:00 2001
+From: Jo-Philipp Wich <jo@mein.io>
+Date: Sat, 10 Oct 2026 00:07:36 +0200
+Subject: [PATCH] ubus: reject list requests with non-string params in
+ uh_ubus_send_list()
+
+The "params" JSON-RPC policy is BLOBMSG_TYPE_UNSPEC, so any client may
+send an array with numbers, booleans or nested objects as "list" params.
+Each element was passed to ubus_lookup() as a NUL-terminated path string
+via blobmsg_data(), but non-string blobmsg entries are not NUL terminated,
+leading to an out-of-bounds read (and potentially a crash) on
+attacker-controlled data, reachable without authentication.
+
+Validate all array entries up front and answer with an "Invalid
+parameters" error if any entry is not a properly terminated string,
+matching how the "call" method rejects malformed params.
+
+Fixes: 38aab5190777 ("ubus: implement list method to enumerate objects and signatures")
+Reported-by: Mohammad Razavi <razavi@dbug.om>
+Signed-off-by: Jo-Philipp Wich <jo@mein.io>
+---
+ ubus.c | 36 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/ubus.c b/ubus.c
+index 24f4bf4..2196594 100644
+--- a/ubus.c
++++ b/ubus.c
+@@ -655,13 +655,40 @@ static void uh_ubus_list_cb(struct ubus_context *ctx, struct ubus_object_data *o
+ 		blobmsg_close_table(data->buf, o);
+ }
+ 
+-static void uh_ubus_send_list(struct client *cl, struct blob_attr *params)
++static bool uh_ubus_valid_list_params(struct blob_attr *params)
++{
++	struct blob_attr *cur;
++	int rem;
++
++	/* non-array params are treated as "list all", as before */
++	if (!params || blob_id(params) != BLOBMSG_TYPE_ARRAY)
++		return true;
++
++	/* Array entries are object paths and must be strings: since the
++	 * "params" policy is BLOBMSG_TYPE_UNSPEC, untrusted JSON-RPC input
++	 * may contain numbers, booleans or nested arrays/objects here whose
++	 * blob payload is not NUL terminated, so passing blobmsg_data() of
++	 * such an entry to ubus_lookup() as a C string would cause an
++	 * out-of-bounds read.
++	 */
++	blobmsg_for_each_attr(cur, params, rem)
++		if (blob_id(cur) != BLOBMSG_TYPE_STRING ||
++		    !blobmsg_check_attr(cur, false))
++			return false;
++
++	return true;
++}
++
++static bool uh_ubus_send_list(struct client *cl, struct blob_attr *params)
+ {
+ 	struct blob_attr *cur, *dup;
+ 	struct list_data data = { .buf = &cl->dispatch.ubus.buf, .verbose = false, .add_object = true };
+ 	void *r;
+ 	int rem;
+ 
++	if (!uh_ubus_valid_list_params(params))
++		return false;
++
+ 	blob_buf_init(data.buf, 0);
+ 
+ 	uh_client_ref(cl);
+@@ -691,6 +718,8 @@ static void uh_ubus_send_list(struct client *cl, struct blob_attr *params)
+ 	uh_ubus_init_json_rpc_response(cl, &buf);
+ 	blobmsg_add_blob(&buf, blob_data(data.buf->head));
+ 	uh_ubus_send_response(cl, &buf);
++
++	return true;
+ }
+ 
+ static bool parse_json_rpc(struct rpc_data *d, struct blob_attr *data)
+@@ -809,7 +838,10 @@ static void uh_ubus_handle_request_object(struct client *cl, struct json_object
+ 		goto out;
+ 	}
+ 	else if (!strcmp(data.method, "list")) {
+-		uh_ubus_send_list(cl, data.params);
++		if (!uh_ubus_send_list(cl, data.params)) {
++			err = ERROR_PARAMS;
++			goto error;
++		}
+ 		goto out;
+ 	}
+ 	else {
