@@ -28,8 +28,8 @@
     "golang": {
       "source": "packages",
       "path": "lang/golang/golang1.26",
-      "commit": "af41897f31a4b5405acb0ca9d7ecdd357d193a9d",
-      "host_version": "1.26.6",
+      "commit": "54fab7fa4224193a121f49a9f39dafd9323a0b2d",
+      "host_version": "1.26.9",
       "packages": {}
     },
     "uhttpd": {
