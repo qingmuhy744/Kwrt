@@ -1,4 +1,5 @@
 import base64
+import copy
 import json
 from pathlib import Path
 import sys
@@ -259,6 +260,39 @@ class AssessmentTests(unittest.TestCase):
     def test_missing_package_update_provenance_cannot_hide_a_fix(self):
         with self.assertRaisesRegex(ValueError, "provenance"):
             assessment.assess(FakeGitHub(), {**LOCK, "package_updates": {"uhttpd": {}}}, baseline(), report())
+
+    def test_beacon_reporting_fix_excludes_only_verified_source_without_the_feature(self):
+        sha = "8ff015a72b863697197c471b19e73ecdccac6914"
+        update = {
+            "source": "openwrt", "path": "package/network/services/hostapd",
+            "commit": "f0a60eee2fe051741c643ea6118718aae1ef17fb", "release": "2",
+            "packages": {"wpad-basic-mbedtls": "2025.08.26~ca266cc2-r2"},
+            "patches": [{"file": "hostapd/900-apsta-reset-clients.patch", "origin": "local",
+                         "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"}]}
+        data, result = baseline(), report()
+        data["packages"] = update["packages"]
+        data["verified_package_updates"] = {"hostapd": update}
+        lock = {**LOCK, "package_updates": data["verified_package_updates"]}
+        result["security_signals"] = [{"key": "commit:openwrt/openwrt:" + sha,
+                                        "title": "hostapd: ubus: fix beacon request buffer overflow with reporting detail",
+                                        "url": "https://github.com/openwrt/openwrt/commit/" + sha}]
+        with patch.object(FakeGitHub, "get", side_effect=AssertionError("Excluded source needs no comparison")):
+            self.assertEqual(assessment.assess(FakeGitHub(), lock, data, result), [])
+        self.assertEqual(result["security_signals"][0]["assessment"], "scope_excluded")
+        for change in ("missing_provenance", "commit", "patch_digest", "extra_patch", "source", "path"):
+            changed = copy.deepcopy(data)
+            candidate = changed["verified_package_updates"]["hostapd"]
+            if change == "missing_provenance":
+                changed.pop("verified_package_updates")
+            elif change == "patch_digest":
+                candidate["patches"][0]["sha256"] = "a" * 64
+            elif change == "extra_patch":
+                candidate["patches"].append({"file": "hostapd/901-new-feature.patch"})
+            else:
+                candidate[change] = "different"
+            with self.subTest(change=change):
+                self.assertIsNone(assessment.scope_exclusion(sha, changed))
+        self.assertIsNone(assessment.scope_exclusion("future-hostapd-fix", data))
 
     def test_missing_upstream_fix_for_an_installed_component_is_actionable(self):
         data, result = baseline(), report()
