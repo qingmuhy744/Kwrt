@@ -123,6 +123,19 @@ def scope_exclusion(sha, inventory):
         return "This MLO/EHT fix requires 802.11be support, disabled in this build"
     if sha == "1e02e8d8f1feb74151ef1c06c16432eea774f7b8" and "bind-server" not in inventory["packages"]:
         return "Only bind-dig/bind-libs are installed; named resolver issues require separate applicability review"
+    if sha == "8ff015a72b863697197c471b19e73ecdccac6914":
+        # fd757101513241b0d56d91778d0559164d4fe619 introduced reporting_detail
+        # after this recipe. Its ubus.c has neither the field nor its writes.
+        # Exclude only the verified recipe and the reviewed ucode-only patch;
+        # any different source or additional backport requires reassessment.
+        update = inventory.get("verified_package_updates", {}).get("hostapd", {})
+        if (update.get("source") == "openwrt"
+                and update.get("path") == "package/network/services/hostapd"
+                and update.get("commit") == "f0a60eee2fe051741c643ea6118718aae1ef17fb"
+                and update.get("patches") == [{
+                    "file": "hostapd/900-apsta-reset-clients.patch", "origin": "local",
+                    "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"}]):
+            return "Verified hostapd source predates reporting_detail support; the reviewed AP+STA patch only changes ucode.c"
     return None
 
 
