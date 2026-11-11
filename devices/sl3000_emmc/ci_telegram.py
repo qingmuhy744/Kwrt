@@ -53,8 +53,8 @@ def verified_files(source, encrypted=False):
             raise ValueError("Delivery checksum mismatch")
     if not encrypted:
         info = json.loads((source / "build-info.json").read_text())
-        if (info.get("wifi_profile") not in ("generic-bootstrap", "public-factory-eeprom-test")
-                or info.get("contains_private_calibration") is True
+        if (info.get("wifi_profile") != "factory-nvmem"
+                or info.get("contains_private_calibration") is not False
                 or info.get("supported_devices") != ["sl,3000-emmc"]):
             raise ValueError("Private or unknown firmware must not be sent as a public archive")
     return files

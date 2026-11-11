@@ -1,4 +1,4 @@
-"""Public per-device Factory calibration test with the pinned generic fallback."""
+"""Default per-device SPI-NOR Factory NVMEM calibration with generic EEPROM fallback."""
 
 import hashlib
 import json
@@ -10,8 +10,7 @@ import subprocess
 import nor_probe
 
 HERE = Path(__file__).resolve().parent
-FRAGMENT = "mt7981b-sl-3000-emmc-factory-test.dtsi"
-MARKER_PATH = "etc/sl3000-factory-test.json"
+FRAGMENT = "mt7981b-sl-3000-emmc-factory.dtsi"
 PARTITION = nor_probe.PARTITIONS + "/partition@180000"
 LAYOUT = PARTITION + "/nvmem-layout"
 EEPROM = LAYOUT + "/eeprom@0"
@@ -19,45 +18,23 @@ PINS = "/soc/pinctrl@11d00000/sl3000-factory-pins"
 NVMEM_POLICY = {"CONFIG_NVMEM": "y", "CONFIG_NVMEM_LAYOUTS": "y"}
 
 
-def enabled():
-    value = os.environ.get("SL3000_FACTORY_TEST", "false")
-    if value not in ("true", "false"):
-        raise ValueError("SL3000_FACTORY_TEST must be true or false")
-    return value == "true"
-
-
-def preflight(publish_release=False):
+def active():
     import rf_test
-    if not enabled():
+    return not rf_test.enabled() and not nor_probe.enabled()
+
+
+def preflight():
+    import rf_test
+    nor_probe.require_private()
+    if not active():
         return
-    if rf_test.enabled() or nor_probe.enabled():
-        raise ValueError("Public Factory test cannot be combined with private RF/NOR profiles")
-    if publish_release:
-        raise ValueError("Public Factory test is artifact-only; do not publish a Release yet")
     if any(os.environ.get(name) for name in (rf_test.CALIBRATION_ENV, rf_test.PASSPHRASE_ENV)):
-        raise ValueError("Public Factory test must not receive private calibration or encryption secrets")
-
-
-def marker():
-    return (json.dumps({
-        "profile": "public-factory-eeprom-test",
-        "hardware_validated": False,
-        "mtd_label": "factory",
-        "factory_offset": "0x180000",
-        "factory_size": "0x200000",
-        "eeprom_offset": 0,
-        "eeprom_size": 4096,
-        "nor_write_access": False,
-        "wifi_calibration_source": "per-device-factory-nvmem",
-        "fallback": "pinned-public-generic-eeprom-via-unmodified-mt76",
-        "contains_private_calibration": False,
-        "warning": "Matching hardware/layout only; generic fallback may have poor Wi-Fi coverage",
-    }, indent=2) + "\n").encode()
+        raise ValueError("Public Factory firmware must not receive private calibration or encryption secrets")
 
 
 def prepare(tree):
     preflight()
-    if not enabled():
+    if not active():
         return
     import rf_test
     for name in (rf_test.FIRMWARE_PATH, rf_test.MARKER_PATH, nor_probe.MARKER_PATH):
@@ -67,13 +44,10 @@ def prepare(tree):
     dts_directory = tree / "target/linux/mediatek/dts"
     dts = dts_directory / "mt7981b-sl-3000-emmc.dts"
     if FRAGMENT in dts.read_text():
-        raise ValueError("Factory test already prepared")
+        raise ValueError("Factory NVMEM already prepared")
     shutil.copy2(HERE / "files" / FRAGMENT, dts_directory / FRAGMENT)
     dts.write_text(dts.read_text() + f'\n#include "{FRAGMENT}"\n')
     nor_probe.configure_kernel(tree, NVMEM_POLICY)
-    path = tree / "files" / MARKER_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(marker())
 
 
 def validate_kernel(text):
@@ -81,7 +55,7 @@ def validate_kernel(text):
     values = dict(line.split("=", 1) for line in text.splitlines()
                   if line.startswith("CONFIG_") and "=" in line)
     if any(values.get(key) != value for key, value in NVMEM_POLICY.items()):
-        raise ValueError("Factory test kernel lacks built-in NVMEM support")
+        raise ValueError("Factory kernel lacks built-in NVMEM support")
 
 
 def validate_dtb(path):
@@ -114,7 +88,7 @@ def validate_dtb(path):
                            (nor_probe.PARTITIONS, ["partition@180000"]),
                            (PARTITION, ["nvmem-layout"]), (LAYOUT, ["eeprom@0"]), (EEPROM, [])):
         if get(path, node, listing="l").split() != children:
-            raise ValueError("Factory test must expose only the read-only Factory partition and EEPROM cell")
+            raise ValueError("Factory firmware must expose only the read-only Factory partition and EEPROM cell")
     if "read-only" not in get(path, PARTITION, listing="p").split():
         raise ValueError("Factory partition is writable")
     forbidden = {"mediatek,mtd-eeprom", "mediatek,eeprom-data"}
@@ -138,8 +112,6 @@ def validate_files(read_file, names):
     eeprom = read_file(rf_test.FIRMWARE_PATH)
     if len(eeprom) != 4096 or hashlib.sha256(eeprom).hexdigest() != lock["mt76_eeprom"]["sha256"]:
         raise ValueError("Public Factory fallback is not the pinned public generic EEPROM")
-    if read_file(MARKER_PATH) != marker():
-        raise ValueError("Public Factory marker missing or changed")
 
 
 def validate_initramfs(path, scratch):

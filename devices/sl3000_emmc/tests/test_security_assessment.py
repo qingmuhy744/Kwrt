@@ -25,7 +25,7 @@ def report():
             "security_signals": [], "advisories": [], "errors": []}
 
 
-LOCK = {"openwrt": {"release": "25.12.5"}}
+LOCK = {"openwrt": {"release": "25.12.6"}}
 
 
 class FakeGitHub:
@@ -261,38 +261,49 @@ class AssessmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance"):
             assessment.assess(FakeGitHub(), {**LOCK, "package_updates": {"uhttpd": {}}}, baseline(), report())
 
-    def test_beacon_reporting_fix_excludes_only_verified_source_without_the_feature(self):
-        sha = "8ff015a72b863697197c471b19e73ecdccac6914"
-        update = {
-            "source": "openwrt", "path": "package/network/services/hostapd",
-            "commit": "f0a60eee2fe051741c643ea6118718aae1ef17fb", "release": "2",
-            "packages": {"wpad-basic-mbedtls": "2025.08.26~ca266cc2-r2"},
-            "patches": [{"file": "hostapd/900-apsta-reset-clients.patch", "origin": "local",
-                         "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"}]}
-        data, result = baseline(), report()
-        data["packages"] = update["packages"]
-        data["verified_package_updates"] = {"hostapd": update}
-        lock = {**LOCK, "package_updates": data["verified_package_updates"]}
-        result["security_signals"] = [{"key": "commit:openwrt/openwrt:" + sha,
-                                        "title": "hostapd: ubus: fix beacon request buffer overflow with reporting detail",
-                                        "url": "https://github.com/openwrt/openwrt/commit/" + sha}]
-        with patch.object(FakeGitHub, "get", side_effect=AssertionError("Excluded source needs no comparison")):
-            self.assertEqual(assessment.assess(FakeGitHub(), lock, data, result), [])
-        self.assertEqual(result["security_signals"][0]["assessment"], "scope_excluded")
-        for change in ("missing_provenance", "commit", "patch_digest", "extra_patch", "source", "path"):
-            changed = copy.deepcopy(data)
-            candidate = changed["verified_package_updates"]["hostapd"]
-            if change == "missing_provenance":
-                changed.pop("verified_package_updates")
-            elif change == "patch_digest":
-                candidate["patches"][0]["sha256"] = "a" * 64
-            elif change == "extra_patch":
-                candidate["patches"].append({"file": "hostapd/901-new-feature.patch"})
-            else:
-                candidate[change] = "different"
-            with self.subTest(change=change):
-                self.assertIsNone(assessment.scope_exclusion(sha, changed))
-        self.assertIsNone(assessment.scope_exclusion("future-hostapd-fix", data))
+    def test_dual_go_toolchains_route_126_and_127_security_signals_separately(self):
+        updates = {
+            "golang": {"source": "packages", "path": "lang/golang/golang1.26",
+                       "commit": "1" * 40, "build_tools": {"golang": "1.26.11"}},
+            "golang1.27": {"source": "packages", "path": "lang/golang/golang1.27",
+                           "commit": "2" * 40, "build_tools": {"golang1.27": "1.27.4"}},
+        }
+        lock = {**LOCK, "package_updates": updates}
+        data = baseline()
+        data["packages"] = {"kernel": "6.12-r1"}
+        data["build_tools"] = {"golang": "1.26.11", "golang1.27": "1.27.4"}
+        data["verified_package_updates"] = copy.deepcopy(updates)
+
+        class GoGitHub(FakeGitHub):
+            def __init__(self, filename, status):
+                super().__init__(message="golang: update to security release (Fixes: CVE-2026-99999)")
+                self.filename, self.status = filename, status
+
+            def get(self, path):
+                if "/compare/" in path:
+                    return {"status": self.status}
+                if "/commits/" in path:
+                    return {"commit": {"message": self.message}, "files": [{"filename": self.filename}]}
+                return super().get(path)
+
+        for filename, status, expected_assessment, expected_component in (
+            ("lang/golang/golang1.27/Makefile", "behind", "fix_pending", {"golang1.27": {"golang1.27/host": "1.27.4"}}),
+            ("lang/golang/golang1.27/Makefile", "ahead", "fixed_in_inventory", {}),
+            ("lang/golang/golang1.26/Makefile", "behind", "fix_pending", {"golang": {"golang/host": "1.26.11"}}),
+            ("lang/golang/golang1.25/Makefile", "behind", "needs_review", {}),
+        ):
+            with self.subTest(filename=filename, status=status):
+                result = report()
+                result["sources"].append({"name": "packages", "repository": "openwrt/packages", "commit": "a" * 40})
+                result["security_signals"] = [{
+                    "key": "commit:openwrt/packages:" + "9" * 40,
+                    "title": "golang: update to security release",
+                    "url": "https://github.com/openwrt/packages/commit/" + "9" * 40,
+                }]
+                actions = assessment.assess(GoGitHub(filename, status), lock, data, result)
+                self.assertEqual(result["errors"], [])
+                self.assertEqual(result["security_signals"][0]["assessment"], expected_assessment)
+                self.assertEqual({action["component"]: action["packages"] for action in actions}, expected_component)
 
     def test_missing_upstream_fix_for_an_installed_component_is_actionable(self):
         data, result = baseline(), report()
@@ -380,6 +391,61 @@ class AssessmentTests(unittest.TestCase):
         result = report()
         self.assertEqual(len(assessment.assess(ReleaseGitHub(), LOCK, baseline(), result)), 1)
         self.assertEqual(result["errors"], [])
+
+    def test_locked_package_updates_align_with_monitored_components(self):
+        import prepare
+        lock = json.loads((ROOT / "sources.lock.json").read_text())
+        prepare.validate_lock(lock)
+        for name, update in lock.get("package_updates", {}).items():
+            with self.subTest(component=name):
+                self.assertIn(name, assessment.COMPONENTS)
+                self.assertEqual((update["source"], update["path"]), assessment.COMPONENTS[name][:2])
+
+    def test_ca_certificates_and_miniupnpd_match_installed_packages(self):
+        data = baseline()
+        data["packages"].update({
+            "ca-bundle": "20260816-r2", "ca-certificates": "20260816-r2",
+            "miniupnpd-nftables": "2.3.9-r2",
+        })
+        self.assertEqual(assessment.packages_for("ca-certificates", data),
+                         {"ca-bundle": "20260816-r2", "ca-certificates": "20260816-r2"})
+        self.assertEqual(assessment.packages_for("miniupnpd", data),
+                         {"miniupnpd-nftables": "2.3.9-r2"})
+
+    def test_tailscale_libtailscale_and_2026_014_to_017_conditions(self):
+        data, result = baseline(), report()
+        data["packages"] = {"tailscale": "1.102.3-r1"}
+        result["advisories"] = [
+            {"id": "TS-2026-012", "repository": "tailscale/tailscale", "vendor": "tailscale",
+             "title": "libtailscale SCM_RIGHTS peer address bug", "url": "https://tailscale.com/security-bulletins/#ts-2026-012",
+             "vulnerabilities": [{"patched_versions": None}]},
+            {"id": "TS-2026-014", "repository": "tailscale/tailscale", "vendor": "tailscale",
+             "title": "Tailscale SSH socket forwarding", "url": "https://tailscale.com/security-bulletins/#ts-2026-014",
+             "vulnerabilities": [{"patched_versions": "1.104.4"}]},
+            {"id": "TS-2026-015", "repository": "tailscale/tailscale", "vendor": "tailscale",
+             "title": "Tailscale SSH DoS", "url": "https://tailscale.com/security-bulletins/#ts-2026-015",
+             "vulnerabilities": [{"patched_versions": "1.104.4"}]},
+            {"id": "TS-2026-016", "repository": "tailscale/tailscale", "vendor": "tailscale",
+             "title": "Serve Unix socket access", "url": "https://tailscale.com/security-bulletins/#ts-2026-016",
+             "vulnerabilities": [{"patched_versions": "1.104.4"}]},
+            {"id": "TS-2026-017", "repository": "tailscale/tailscale", "vendor": "tailscale",
+             "title": "Serve HTTP/2 shared context", "url": "https://tailscale.com/security-bulletins/#ts-2026-017",
+             "vulnerabilities": [{"patched_versions": "1.104.4"}]},
+        ]
+        policy = {"schema": 1, "basis": "Default unknown Tailscale runtime features", "features": {}}
+        self.assertEqual(assessment.assess(FakeGitHub(), LOCK, data, copy.deepcopy(result), policy), [])
+        disabled = {"schema": 1, "basis": "No SSH or Serve", "features": {
+            "tailscale_ssh": False, "tailscale_serve": False, "tailscale_funnel": False}}
+        checked = copy.deepcopy(result)
+        self.assertEqual(assessment.assess(FakeGitHub(), LOCK, data, checked, disabled), [])
+        self.assertEqual([item["status"] for item in checked["advisories"]],
+                         ["not_installed", *(["configuration_excluded"] * 4)])
+        enabled = {"schema": 1, "basis": "SSH enabled without forwarding", "features": {
+            "tailscale_ssh": True, "tailscale_ssh_forwarding": False,
+            "tailscale_serve": False, "tailscale_funnel": False}}
+        checked = copy.deepcopy(result)
+        actions = assessment.assess(FakeGitHub(), LOCK, data, checked, enabled)
+        self.assertEqual([action["key"] for action in actions], ["advisory:TS-2026-015"])
 
 
 if __name__ == "__main__":

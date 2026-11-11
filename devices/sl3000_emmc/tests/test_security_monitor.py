@@ -45,8 +45,8 @@ class FakeGitHub:
         if "/releases/tags/" in path:
             return {"body": "Fixed GHSA-abcd-efgh-ijkl"}
         if path.endswith("/releases/latest"):
-            pins = {"openwrt/openwrt": "25.12.5", "Openwrt-Passwall/openwrt-passwall": "26.9.1-1",
-                    "vernesong/OpenClash": "v0.47.156", "MetaCubeX/mihomo": "v1.19.30"}
+            pins = {"openwrt/openwrt": "25.12.6", "Openwrt-Passwall/openwrt-passwall": "26.9.1-1",
+                    "vernesong/OpenClash": "v0.47.156", "MetaCubeX/mihomo": "v1.19.33"}
             repo = path.removeprefix("repos/").removesuffix("/releases/latest")
             return {"tag_name": pins.get(repo, "nightly")}
         return {"default_branch": "25.12"}

@@ -10,16 +10,12 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-import factory_test
+sys.path[:0] = [str(ROOT), str(Path(__file__).resolve().parent)]
+import factory_eeprom
 import nor_probe
 import rf_test
-from test_rf_test import fixture
+from test_rf_test import fixture, private_env
 from test_nor_probe import kernel_config as nor_kernel_config
-
-
-def public_env():
-    return {"SL3000_FACTORY_TEST": "true", "SL3000_RF_TEST": "false", "SL3000_NOR_PROBE": "false"}
 
 
 def kernel_config():
@@ -27,18 +23,19 @@ def kernel_config():
 
 
 class FactoryProfileTests(unittest.TestCase):
-    def test_public_profile_does_not_need_private_secrets_and_forbids_release(self):
-        with patch.dict(os.environ, public_env(), clear=True):
+    def test_default_profile_is_active_and_allows_formal_release(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(factory_eeprom.active())
             rf_test.preflight(False)
-            with self.assertRaisesRegex(ValueError, "artifact-only"):
-                rf_test.preflight(True)
-        with patch.dict(os.environ, {"SL3000_FACTORY_TEST": "invalid"}, clear=True):
-            with self.assertRaises(ValueError):
-                factory_test.enabled()
+            rf_test.preflight(True)
+        with patch.dict(os.environ, private_env(), clear=True):
+            self.assertFalse(factory_eeprom.active())
 
     def test_public_private_conflicts_and_secrets_are_rejected(self):
-        for name in ("SL3000_RF_TEST", "SL3000_NOR_PROBE", rf_test.CALIBRATION_ENV, rf_test.PASSPHRASE_ENV):
-            with self.subTest(name=name), patch.dict(os.environ, {**public_env(), name: "true"}, clear=True):
+        for name, value in (("SL3000_NOR_PROBE", "true"),
+                            (rf_test.CALIBRATION_ENV, "secret"),
+                            (rf_test.PASSPHRASE_ENV, "12" * 32)):
+            with self.subTest(name=name), patch.dict(os.environ, {name: value}, clear=True):
                 with self.assertRaises(ValueError):
                     rf_test.preflight(False)
                 with tempfile.TemporaryDirectory() as directory:
@@ -46,7 +43,7 @@ class FactoryProfileTests(unittest.TestCase):
                         rf_test.inject(Path(directory))
                     self.assertEqual(list(Path(directory).iterdir()), [])
 
-    def test_opt_in_prepare_only_adds_public_dts_policy_and_marker(self):
+    def test_default_prepare_adds_factory_dts_and_kernel_policy_unless_rf_test_enabled(self):
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)
             dts = tree / "target/linux/mediatek/dts/mt7981b-sl-3000-emmc.dts"
@@ -56,40 +53,39 @@ class FactoryProfileTests(unittest.TestCase):
             config = tree / "target/linux/mediatek/filogic/config-6.12"
             config.parent.mkdir(parents=True)
             config.write_text("CONFIG_EXISTING=y\nCONFIG_MTD_SPI_NOR_SWP_DISABLE=y\n")
-            with patch.dict(os.environ, {}, clear=True):
-                factory_test.prepare(tree)
+            with patch.dict(os.environ, private_env(), clear=True):
+                factory_eeprom.prepare(tree)
                 self.assertEqual(dts.read_text(), base)
                 self.assertFalse((tree / "files").exists())
-            with patch.dict(os.environ, public_env(), clear=True):
-                factory_test.prepare(tree)
-                self.assertEqual(dts.read_text(), base + f'\n#include "{factory_test.FRAGMENT}"\n')
-                marker = tree / "files" / factory_test.MARKER_PATH
-                self.assertEqual(marker.read_bytes(), factory_test.marker())
-                self.assertEqual([p for p in (tree / "files").rglob("*") if p.is_file()], [marker])
+            with patch.dict(os.environ, {}, clear=True):
+                factory_eeprom.prepare(tree)
+                self.assertEqual(dts.read_text(), base + f'\n#include "{factory_eeprom.FRAGMENT}"\n')
+                self.assertFalse((tree / "files").exists())
                 self.assertIn("CONFIG_EXISTING=y", config.read_text())
                 self.assertNotIn("CONFIG_MTD_SPI_NOR_SWP_DISABLE=y", config.read_text())
                 self.assertIn("CONFIG_NVMEM=y", config.read_text())
+                self.assertIn("CONFIG_NVMEM_LAYOUTS=y", config.read_text())
                 with self.assertRaisesRegex(ValueError, "already prepared"):
-                    factory_test.prepare(tree)
+                    factory_eeprom.prepare(tree)
 
     def test_existing_eeprom_overlay_is_rejected_before_edits(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, public_env(), clear=True):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
             tree = Path(directory)
             path = tree / "files" / rf_test.FIRMWARE_PATH
             path.parent.mkdir(parents=True)
             path.write_bytes(fixture())
             with self.assertRaisesRegex(ValueError, "private overlay"):
-                factory_test.prepare(tree)
+                factory_eeprom.prepare(tree)
             self.assertEqual(path.read_bytes(), fixture())
 
     def test_kernel_requires_nvmem_and_read_only_policy(self):
         text = kernel_config()
-        factory_test.validate_kernel(text)
+        factory_eeprom.validate_kernel(text)
         for symbol in ("CONFIG_NVMEM", "CONFIG_NVMEM_LAYOUTS", "CONFIG_MTD_SPI_NOR_SWP_KEEP"):
             with self.subTest(symbol=symbol), self.assertRaises(ValueError):
-                factory_test.validate_kernel(text.replace(f"{symbol}=y", f"{symbol}=m"))
+                factory_eeprom.validate_kernel(text.replace(f"{symbol}=y", f"{symbol}=m"))
         with self.assertRaises(ValueError):
-            factory_test.validate_kernel(text + "CONFIG_MTD_PARTITIONED_MASTER=y\n")
+            factory_eeprom.validate_kernel(text + "CONFIG_MTD_PARTITIONED_MASTER=y\n")
 
 
 class FactoryFilesTests(unittest.TestCase):
@@ -102,20 +98,16 @@ class FactoryFilesTests(unittest.TestCase):
         (self.root / "sources.lock.json").write_text(json.dumps({
             "mt76_eeprom": {"sha256": hashlib.sha256(self.eeprom).hexdigest()},
         }))
-        self.files = {rf_test.FIRMWARE_PATH: self.eeprom, factory_test.MARKER_PATH: factory_test.marker()}
+        self.files = {rf_test.FIRMWARE_PATH: self.eeprom}
 
     def validate(self):
-        with patch.object(factory_test, "HERE", self.root):
-            factory_test.validate_files(self.files.__getitem__, self.files)
+        with patch.object(factory_eeprom, "HERE", self.root):
+            factory_eeprom.validate_files(self.files.__getitem__, self.files)
 
-    def test_requires_exact_public_fallback_and_marker(self):
+    def test_requires_exact_public_fallback_eeprom(self):
         self.validate()
         self.files[rf_test.FIRMWARE_PATH] = b"\xff" * 4096
         with self.assertRaisesRegex(ValueError, "pinned public generic"):
-            self.validate()
-        self.files[rf_test.FIRMWARE_PATH] = self.eeprom
-        self.files[factory_test.MARKER_PATH] = b"wrong marker"
-        with self.assertRaisesRegex(ValueError, "marker missing or changed"):
             self.validate()
 
     def test_private_markers_are_rejected_even_with_public_fallback(self):
@@ -138,7 +130,7 @@ class FactoryFilesTests(unittest.TestCase):
         fit = self.root / "initramfs.itb"
         source = '''/dts-v1/;
 / {
-    description = "Synthetic Factory test FIT";
+    description = "Synthetic Factory FIT";
     timestamp = <0>;
     images {
         initrd-1 { data = /incbin/ ("initrd.cpio"); type = "ramdisk"; };
@@ -154,12 +146,12 @@ class FactoryFilesTests(unittest.TestCase):
             subprocess.run(["dtc", "-q", "-i", str(self.root), "-O", "dtb", "-o", str(fit), "-"],
                            input=source, text=True, check=True, capture_output=True)
         build()
-        with patch.object(factory_test, "HERE", self.root):
-            factory_test.validate_initramfs(fit, self.root)
+        with patch.object(factory_eeprom, "HERE", self.root):
+            factory_eeprom.validate_initramfs(fit, self.root)
             (contents / rf_test.FIRMWARE_PATH).write_bytes(b"\xff" * 4096)
             build()
             with self.assertRaisesRegex(ValueError, "pinned public generic"):
-                factory_test.validate_initramfs(fit, self.root)
+                factory_eeprom.validate_initramfs(fit, self.root)
 
 
 @unittest.skipUnless(all(shutil.which(tool) for tool in ("dtc", "fdtget", "fdtput")),
@@ -191,18 +183,18 @@ class FactoryDeviceTreeTests(unittest.TestCase):
     };
 };
 '''
-        source += (ROOT / "files" / factory_test.FRAGMENT).read_text()
+        source += (ROOT / "files" / factory_eeprom.FRAGMENT).read_text()
         subprocess.run(["dtc", "-q", "-I", "dts", "-O", "dtb", "-o", str(self.dtb), "-"],
                        input=source, text=True, check=True, capture_output=True)
 
     def test_factory_is_read_only_and_bound_to_wifi_without_device_bytes(self):
-        factory_test.validate_dtb(self.dtb)
+        factory_eeprom.validate_dtb(self.dtb)
 
     def test_wrong_factory_offset_eeprom_length_or_binding_is_rejected(self):
         original = self.dtb.read_bytes()
         for node, prop, values in (
-            (factory_test.PARTITION, "reg", ["0", "200000"]),
-            (factory_test.EEPROM, "reg", ["0", "200000"]),
+            (factory_eeprom.PARTITION, "reg", ["0", "200000"]),
+            (factory_eeprom.EEPROM, "reg", ["0", "200000"]),
             (nor_probe.WIFI, "nvmem-cells", ["ffff"]),
             (nor_probe.SPI, "pinctrl-0", ["ffff"]),
         ):
@@ -210,12 +202,12 @@ class FactoryDeviceTreeTests(unittest.TestCase):
                 self.dtb.write_bytes(original)
                 subprocess.run(["fdtput", "-t", "x", str(self.dtb), node, prop, *values], check=True)
                 with self.assertRaises(ValueError):
-                    factory_test.validate_dtb(self.dtb)
+                    factory_eeprom.validate_dtb(self.dtb)
 
     def test_writable_factory_extra_partition_and_eeprom_override_are_rejected(self):
         original = self.dtb.read_bytes()
         commands = [
-            ["-d", str(self.dtb), factory_test.PARTITION, "read-only"],
+            ["-d", str(self.dtb), factory_eeprom.PARTITION, "read-only"],
             ["-c", str(self.dtb), nor_probe.PARTITIONS + "/partition@0"],
             ["-t", "x", str(self.dtb), nor_probe.WIFI, "mediatek,eeprom-data", "7981"],
         ]
@@ -224,7 +216,7 @@ class FactoryDeviceTreeTests(unittest.TestCase):
                 self.dtb.write_bytes(original)
                 subprocess.run(["fdtput", *command], check=True)
                 with self.assertRaises(ValueError):
-                    factory_test.validate_dtb(self.dtb)
+                    factory_eeprom.validate_dtb(self.dtb)
 
     def test_all_embedded_fit_configurations_are_validated(self):
         fit = self.root / "kernel.fit"
@@ -242,10 +234,10 @@ class FactoryDeviceTreeTests(unittest.TestCase):
 '''
         subprocess.run(["dtc", "-q", "-i", str(self.root), "-O", "dtb", "-o", str(fit), "-"],
                        input=source, text=True, check=True, capture_output=True)
-        factory_test.validate_fit(fit, self.root)
+        factory_eeprom.validate_fit(fit, self.root)
         subprocess.run(["fdtput", "-t", "s", str(fit), "/configurations/config-2", "fdt", "missing"], check=True)
         with self.assertRaises(ValueError):
-            factory_test.validate_fit(fit, self.root)
+            factory_eeprom.validate_fit(fit, self.root)
 
 
 if __name__ == "__main__":

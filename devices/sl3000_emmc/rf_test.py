@@ -65,8 +65,8 @@ def passphrase():
 
 
 def preflight(publish_release):
-    import factory_test
-    factory_test.preflight(publish_release)
+    import factory_eeprom
+    factory_eeprom.preflight()
     import nor_probe
     nor_probe.require_private()
     if enabled():
@@ -92,8 +92,8 @@ def write_private(path, data):
 
 
 def inject(tree):
-    import factory_test
-    factory_test.preflight()
+    import factory_eeprom
+    factory_eeprom.preflight()
     if not enabled():
         return
     data = calibration()

@@ -24,7 +24,7 @@ class DeliveryFilesTests(unittest.TestCase):
         for name in delivery.PUBLIC_FILES - {"sha256sums"}:
             (self.source / name).write_bytes((name + "\n").encode() * 10)
         self.provenance = {
-            "wifi_profile": "public-factory-eeprom-test",
+            "wifi_profile": "factory-nvmem",
             "supported_devices": ["sl,3000-emmc"], "contains_private_calibration": False,
         }
         self.update_provenance()
@@ -91,10 +91,12 @@ class DeliveryFilesTests(unittest.TestCase):
 
     def test_private_plaintext_is_rejected_even_with_valid_checksums(self):
         for field, value in (("wifi_profile", "private-runtime-eeprom-ab-test"),
+                             ("wifi_profile", "generic-bootstrap"),
                              ("contains_private_calibration", True),
+                             ("contains_private_calibration", None),
                              ("supported_devices", ["other-device"])):
             original = self.provenance[field]
-            with self.subTest(field=field):
+            with self.subTest(field=field, value=value):
                 self.provenance[field] = value
                 self.update_provenance()
                 with self.assertRaisesRegex(ValueError, "Private or unknown"):

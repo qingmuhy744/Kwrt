@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
-// Based on Kwrt's SL-3000 bootstrap DTS, for the existing three-partition GPT.
+// SL-3000 eMMC (1 GiB) base device tree for the three-partition eMMC GPT.
 /dts-v1/;
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/input/input.h>
 #include "mt7981b.dtsi"
 
 / {
-	model = "SL-3000 eMMC bootstrap (1 GiB)";
+	model = "SL-3000 eMMC (1 GiB)";
 	compatible = "sl,3000-emmc", "mediatek,mt7981";
 
 	aliases {
@@ -131,8 +131,8 @@
 	};
 };
 
-// No phantom factory NVMEM: this bootstrap GPT has kernel/rootfs/storage only.
-// mt76 reads efuse, then uses its packaged default EEPROM if invalid.
+// Per-device SPI-NOR Factory NVMEM is included by default in prepare.py;
+// archived private RF/NOR diagnostic modes omit or override it as needed.
 &wifi { status = "okay"; };
 &uart0 { status = "okay"; };
 &watchdog { status = "okay"; };

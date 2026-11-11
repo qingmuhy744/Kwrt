@@ -16,14 +16,15 @@ sys.path.insert(0, str(ROOT))
 import verify
 import rf_test
 import nor_probe
-import factory_test
+import factory_eeprom
 from test_rf_test import fixture, private_env
+from test_factory_eeprom import kernel_config as factory_kernel_config
 from test_network import network_files
 from test_hardening import acl_fixture
 import hardening
 from prepare import VNSTAT_FILES
 
-IMAGE_PREFIX = f"openwrt-25.12.5-mediatek-filogic-{verify.PROFILE}"
+IMAGE_PREFIX = f"openwrt-25.12.6-mediatek-filogic-{verify.PROFILE}"
 INITRAMFS_NAME = f"{IMAGE_PREFIX}-initramfs.itb"
 PASSWORD = "temporary-test-password"
 
@@ -54,9 +55,9 @@ class ArtifactCollectionTests(unittest.TestCase):
         for update in json.loads((ROOT / "sources.lock.json").read_text()).get("package_updates", {}).values():
             packages.update(update["packages"])
         self.manifest.write_text("\n".join(f"{name} - {version}" for name, version in packages.items()))
-        kernel_config = self.tree / "build_dir/target-aarch64/linux-mediatek_filogic/linux-6.12.1/.config"
+        kernel_config = self.tree / "build_dir/target-aarch64/linux-mediatek_filogic/linux-6.12.116/.config"
         kernel_config.parent.mkdir(parents=True)
-        kernel_config.write_text("CONFIG_MMC=y\nCONFIG_MMC_BLOCK=y\nCONFIG_MMC_MTK=y\n")
+        kernel_config.write_text("CONFIG_MMC=y\nCONFIG_MMC_BLOCK=y\nCONFIG_MMC_MTK=y\n" + factory_kernel_config())
         self.metadata = {"supported_devices": [verify.BOARD]}
 
     def read_metadata(self, command, *, check):
@@ -66,17 +67,25 @@ class ArtifactCollectionTests(unittest.TestCase):
         Path(command[2]).write_text(json.dumps(self.metadata))
         return subprocess.CompletedProcess(command, 0)
 
-    def collect(self, rootfs_error=None):
+    def collect(self, rootfs_error=None, fit_error=None, initramfs_error=None):
         # Only external firmware inspection is mocked; collection and safety checks run normally.
         with patch.dict(os.environ, {"DEFAULT_WIFI_PASSWORD": PASSWORD}), \
                 patch.object(verify.subprocess, "run", side_effect=self.read_metadata) as fwtool, \
                 patch.object(verify, "verify_rootfs", side_effect=rootfs_error) as rootfs, \
+                patch.object(factory_eeprom, "validate_fit", side_effect=fit_error) as fit_check, \
+                patch.object(factory_eeprom, "validate_initramfs", side_effect=initramfs_error) as initramfs_check, \
                 contextlib.redirect_stdout(io.StringIO()):
             verify.artifacts(self.tree, self.output)
             fwtool.assert_called_once()
             rootfs.assert_called_once()
             self.assertEqual(rootfs.call_args.args[0], self.sysupgrade)
             self.assertEqual(rootfs.call_args.args[2], PASSWORD)
+            if factory_eeprom.active():
+                self.assertEqual(fit_check.call_count, 2)
+                self.assertEqual(fit_check.call_args_list[0].args[0].name, "kernel.fit")
+                self.assertEqual(fit_check.call_args_list[1].args[0], self.initramfs)
+                initramfs_check.assert_called_once()
+                self.assertEqual(initramfs_check.call_args.args[0], self.initramfs)
 
     def test_initramfs_name_matches_device_recipe(self):
         makefile = f"""DEVICE_IMG_PREFIX := {IMAGE_PREFIX}
@@ -95,7 +104,7 @@ inspect:
         )
         self.assertEqual(result.stdout.strip(), INITRAMFS_NAME)
 
-    def test_collects_expected_images_and_checksums(self):
+    def test_collects_expected_images_and_formal_release_provenance(self):
         for name in ("fip.bin", "bl2.bin", "gpt.bin", "other-initramfs.itb"):
             (self.target / name).write_bytes(b"not an approved artifact")
         self.collect()
@@ -111,7 +120,12 @@ inspect:
             self.assertEqual(digest, verify.sha256(self.output / name))
             checksums[name] = digest
         self.assertEqual(set(checksums), expected - {"sha256sums"})
-        self.assertFalse(json.loads((self.output / "build-info.json").read_text())["hardware_validated"])
+        info = json.loads((self.output / "build-info.json").read_text())
+        self.assertEqual(info["status"], "release")
+        self.assertEqual(info["wifi_profile"], "factory-nvmem")
+        self.assertEqual(info["nor_profile"], "read-only-factory-nvmem")
+        self.assertEqual(info["eeprom_fallback"], "pinned-public-generic")
+        self.assertFalse(info["contains_private_calibration"])
 
     def test_missing_or_misnamed_initramfs_is_rejected(self):
         self.initramfs.unlink()
@@ -160,9 +174,7 @@ inspect:
                 rustc.unlink()
 
     def test_nor_profile_checks_both_fit_payloads_before_export(self):
-        from test_nor_probe import kernel_config, probe_env
-        config = next(self.tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"))
-        config.write_text(config.read_text() + kernel_config())
+        from test_nor_probe import probe_env
         with patch.dict(os.environ, probe_env()), \
                 patch.object(nor_probe, "validate_fit") as inspect:
             self.collect()
@@ -170,8 +182,10 @@ inspect:
             self.assertEqual(inspect.call_args_list[0].args[0].name, "kernel.fit")
             self.assertEqual(inspect.call_args_list[1].args[0], self.initramfs)
         info = json.loads((self.output / "build-info.json").read_text())
+        self.assertEqual(info["status"], "private-diagnostic")
         self.assertEqual(info["nor_profile"], "read-only-probe")
         self.assertEqual(info["wifi_profile"], "private-runtime-eeprom-ab-test")
+        self.assertTrue(info["contains_private_calibration"])
 
     def test_invalid_nor_fit_prevents_export(self):
         from test_nor_probe import probe_env
@@ -181,37 +195,13 @@ inspect:
                 self.collect()
         self.assertFalse(self.output.exists())
 
-    def test_public_factory_profile_checks_both_dts_and_initramfs_contents(self):
-        from test_factory_test import kernel_config, public_env
-        config = next(self.tree.glob("build_dir/target-*/linux-mediatek_filogic/linux-6.12*/.config"))
-        config.write_text(config.read_text() + kernel_config())
-        with patch.dict(os.environ, public_env()), \
-                patch.object(factory_test, "validate_fit") as inspect, \
-                patch.object(factory_test, "validate_initramfs") as initramfs:
-            self.collect()
-            self.assertEqual(inspect.call_count, 2)
-            self.assertEqual(inspect.call_args_list[0].args[0].name, "kernel.fit")
-            self.assertEqual(inspect.call_args_list[1].args[0], self.initramfs)
-            initramfs.assert_called_once()
-            self.assertEqual(initramfs.call_args.args[0], self.initramfs)
-        info = json.loads((self.output / "build-info.json").read_text())
-        self.assertEqual(info["wifi_profile"], "public-factory-eeprom-test")
-        self.assertEqual(info["nor_profile"], "read-only-factory-nvmem")
-        self.assertEqual(info["eeprom_fallback"], "pinned-public-generic")
-        self.assertFalse(info["contains_private_calibration"])
-        self.assertFalse(info["hardware_validated"])
-
-    def test_public_factory_invalid_dts_or_private_initramfs_prevents_export(self):
-        from test_factory_test import public_env
-        for failing in ("validate_fit", "validate_initramfs"):
-            with self.subTest(failing=failing), patch.dict(os.environ, public_env()), \
-                    patch.object(factory_test, "validate_fit") as inspect, \
-                    patch.object(factory_test, "validate_initramfs") as initramfs:
-                check = inspect if failing == "validate_fit" else initramfs
-                check.side_effect = ValueError("unsafe public image fixture")
-                with self.assertRaisesRegex(ValueError, "unsafe public image fixture"):
-                    self.collect()
-                self.assertFalse(self.output.exists())
+    def test_default_factory_invalid_dts_or_private_initramfs_prevents_export(self):
+        for kwargs in ({"fit_error": ValueError("unsafe public image fixture")},
+                       {"initramfs_error": ValueError("unsafe public image fixture")}):
+            with self.subTest(kwargs=list(kwargs)), \
+                    self.assertRaisesRegex(ValueError, "unsafe public image fixture"):
+                self.collect(**kwargs)
+            self.assertFalse(self.output.exists())
 
 
 class RootfsRFTests(unittest.TestCase):

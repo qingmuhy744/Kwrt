@@ -8,33 +8,21 @@ on:
         type: boolean
         default: false
       publish_release:
-        description: Publish validated outputs as a prerelease (no hardware certification)
+        description: Publish validated formal firmware as a GitHub Release
         type: boolean
         default: false
-      public_setup_password:
-        description: I accept that the image contains a PUBLIC TEMPORARY Wi-Fi password
-        type: boolean
-        default: false
-      rf_test:
-        description: Private same-router runtime EEPROM A/B test; encrypted artifact only
-        type: boolean
-        default: false
-      nor_probe:
-        description: Private read-only NOR diagnosis; requires rf_test, keeps its Wi-Fi EEPROM
-        type: boolean
-        default: false
-      factory_test:
-        description: Public test; per-device read-only Factory with public generic EEPROM fallback
-        type: boolean
-        default: false
-      compare_run:
-        description: Optional baseline run ID for compile-time comparison (queue time excluded)
-        type: string
-        default: ''
       telegram_artifacts:
         description: Send verified outputs to Telegram, split into files of at most 45 MiB
         type: boolean
         default: true
+      rf_test:
+        description: Archived diagnostic; private same-router runtime EEPROM A/B test (encrypted only)
+        type: boolean
+        default: false
+      nor_probe:
+        description: Archived diagnostic; private read-only NOR probe (requires rf_test)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -49,7 +37,6 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
-      actions: read
     defaults:
       run:
         shell: bash
@@ -63,7 +50,6 @@ jobs:
       CCACHE_MAXSIZE: 2GiB
       SL3000_RF_TEST: ${{ inputs.rf_test && 'true' || 'false' }}
       SL3000_NOR_PROBE: ${{ inputs.nor_probe && 'true' || 'false' }}
-      SL3000_FACTORY_TEST: ${{ inputs.factory_test && 'true' || 'false' }}
     steps:
       - name: Checkout recipe
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,18 +59,12 @@ jobs:
       - name: Preflight inputs
         env:
           DEFAULT_WIFI_PASSWORD: ${{ secrets.DEFAULT_WIFI_PASSWORD }}
-          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
-          PUBLIC_SETUP_PASSWORD: ${{ inputs.public_setup_password }}
           PUBLISH_RELEASE: ${{ inputs.publish_release }}
           SEND_TELEGRAM: ${{ inputs.telegram_artifacts }}
           TELEGRAM_CONFIGURED: ${{ secrets.TELEGRAM_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
           SL3000_RF_TEST_CALIBRATION: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_CALIBRATION || '' }}
           SL3000_RF_TEST_PASSPHRASE: ${{ inputs.rf_test && secrets.SL3000_RF_TEST_PASSPHRASE || '' }}
         run: |
-          if [[ "$REPOSITORY_PRIVATE" != true && "$PUBLIC_SETUP_PASSWORD" != true ]]; then
-            echo 'Public images expose their Wi-Fi password. Confirm use of a public temporary password.'
-            exit 1
-          fi
           if [[ "$SEND_TELEGRAM" == true && "$TELEGRAM_CONFIGURED" != true ]]; then
             echo 'Telegram delivery requires TELEGRAM_TOKEN and TELEGRAM_CHAT_ID secrets.'
             exit 1
@@ -107,14 +87,13 @@ jobs:
         env:
           SL3000_RF_TEST: 'false'
           SL3000_NOR_PROBE: 'false'
-          SL3000_FACTORY_TEST: 'false'
         run: python3 -m unittest discover -s "$RECIPE/tests" -v
 
       - name: Compute independent cache keys
         id: cache_keys
         env:
-          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/hardening.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/factory_test.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**', 'devices/sl3000_emmc/patches/**') }}
-          BUILD_PROFILE: ${{ inputs.factory_test && 'factory-test' || inputs.nor_probe && 'nor-probe' || inputs.rf_test && 'rf-test' || 'generic' }}
+          RECIPE_HASH: ${{ hashFiles('devices/sl3000_emmc/sources.lock.json', 'devices/sl3000_emmc/.config', 'devices/sl3000_emmc/prepare.py', 'devices/sl3000_emmc/hardening.py', 'devices/sl3000_emmc/nor_probe.py', 'devices/sl3000_emmc/factory_eeprom.py', 'devices/sl3000_emmc/image.mk', 'devices/sl3000_emmc/files/**', 'devices/sl3000_emmc/packages/**', 'devices/sl3000_emmc/patches/**') }}
+          BUILD_PROFILE: ${{ inputs.nor_probe && 'nor-probe' || inputs.rf_test && 'rf-test' || 'release' }}
         run: |
           namespace="sl3000-v2-ubuntu-24.04-${RUNNER_OS}-${RUNNER_ARCH}"
           download_prefix="${namespace}-dl-${RECIPE_HASH}-"
@@ -195,7 +174,6 @@ jobs:
         env:
           SL3000_RF_TEST: 'false'
           SL3000_NOR_PROBE: 'false'
-          SL3000_FACTORY_TEST: 'false'
         run: |
           python3 "$RECIPE/tests/build_network_test_tools.py" "$OPENWRT" "$RUNNER_TEMP/sl3000-network-tools"
           export SL3000_TEST_UCODE="$RUNNER_TEMP/sl3000-network-tools/install/bin/ucode"
@@ -288,7 +266,7 @@ jobs:
         timeout-minutes: 45
         uses: ./.github/actions/upload-artifact-retry
         with:
-          name: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}
+          name: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || '' }}${{ github.run_id }}
           path: ${{ runner.temp }}/${{ inputs.rf_test && 'sl3000-encrypted' || 'sl3000-release' }}/*
           retention-days: 14
 
@@ -312,7 +290,7 @@ jobs:
           BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           FIRMWARE_UPLOAD_STATUS: ${{ steps.firmware_upload.outcome }}
           FIRMWARE_ARTIFACT_URL: ${{ steps.firmware_upload.outputs.artifact-url }}
-          ARTIFACT_NAME: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || inputs.factory_test && 'factory-test-' || '' }}${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          ARTIFACT_NAME: sl3000-emmc-${{ inputs.nor_probe && 'nor-probe-' || inputs.rf_test && 'rf-test-' || '' }}${{ github.run_id }}-attempt-${{ github.run_attempt }}
         run: |
           source="$RUNNER_TEMP/sl3000-release"
           args=()
@@ -333,55 +311,34 @@ jobs:
             echo '### SL-3000 eMMC'
             echo "GitHub firmware upload: $FIRMWARE_UPLOAD_STATUS"
             echo "Telegram artifact delivery: $TELEGRAM_DELIVERY_STATUS"
-            echo 'OpenWrt 25.12.5, pinned feeds and proxy components.'
+            echo 'OpenWrt 25.12.6 / Linux 6.12.116, pinned feeds and proxy components.'
             echo 'Ruby/YAML retained; optional Ruby YJIT disabled; no Rust host toolchain built.'
-            echo 'Image checks passed. Hardware acceptance is still required.'
             echo 'Only sysupgrade/initramfs and verification records are exported. No BL2/FIP/GPT.'
             echo 'The setup Wi-Fi password is extractable from the image. Change it on first login.'
             if [[ "$SL3000_RF_TEST" == true ]]; then
-              echo 'PRIVATE RF PROFILE: captured runtime EEPROM, pinned mt76/MCU versions.'
-              echo 'Only an AES-256 encrypted archive is uploaded. The decryption key is held locally.'
-              echo 'Use only on the source router. Do not redistribute the decrypted images.'
-            fi
-            if [[ "$SL3000_NOR_PROBE" == true ]]; then
-              echo 'NOR DIAGNOSTIC: one read-only raw partition; hardware write protection retained.'
-              echo 'No factory-to-Wi-Fi NVMEM binding. Current runtime EEPROM is retained.'
-              echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
-            fi
-            if [[ "$SL3000_FACTORY_TEST" == true ]]; then
-              echo 'PUBLIC FACTORY TEST: read-only Factory NVMEM at 0x180000, EEPROM size 4096 bytes.'
-              echo 'Unmodified mt76 retains the pinned public generic EEPROM fallback; coverage may be poor on fallback.'
-              echo 'No private calibration input or encryption. Both images checked for the public EEPROM and profile.'
-              echo 'Artifact only, no Release. Matching hardware/layout requires post-flash validation.'
-              echo 'Same-base LuCI sysupgrade with Keep settings is supported; back up configuration first.'
+              echo 'PRIVATE RF DIAGNOSTIC: captured runtime EEPROM, AES-256 encrypted archive only.'
+              if [[ "$SL3000_NOR_PROBE" == true ]]; then
+                echo 'PRIVATE NOR DIAGNOSTIC: read-only raw partition without Factory NVMEM binding.'
+              fi
+            else
+              echo 'DEFAULT FACTORY PROFILE: read-only SPI-NOR Factory NVMEM at 0x180000 (4096 B EEPROM) + pinned generic fallback.'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Compare compile time with baseline
-        if: ${{ inputs.compare_run != '' && !cancelled() && steps.compile.outcome == 'success' }}
-        continue-on-error: true
-        timeout-minutes: 3
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASELINE_RUN: ${{ inputs.compare_run }}
-        run: |
-          python3 "$RECIPE/ci_compare.py" --baseline-run "$BASELINE_RUN" \
-            --current-run "$GITHUB_RUN_ID" --repository "$GITHUB_REPOSITORY"
-
   release:
-    if: ${{ inputs.publish_release && !inputs.rf_test && !inputs.factory_test }}
+    if: ${{ inputs.publish_release && !inputs.rf_test }}
     needs: build
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - name: Download verified output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: sl3000-emmc-${{ github.run_id }}
           path: release
 
-      - name: Publish prerelease
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -390,7 +347,7 @@ jobs:
         run: |
           cd release
           sha256sum -c sha256sums
-          gh release create "sl3000-25.12.5-${RUN_NUMBER}" ./* \
-            --target "$RECIPE_COMMIT" --prerelease \
-            --title "SL-3000 eMMC / OpenWrt 25.12.5 / test ${RUN_NUMBER}" \
+          gh release create "sl3000-25.12.6-${RUN_NUMBER}" ./* \
+            --target "$RECIPE_COMMIT" \
+            --title "SL-3000 eMMC / OpenWrt 25.12.6 #${RUN_NUMBER}" \
             --notes-file README.md

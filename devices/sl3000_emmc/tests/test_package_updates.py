@@ -133,10 +133,19 @@ class PackageUpdateTests(unittest.TestCase):
                 prepare.validate_lock(lock)
 
     def test_host_toolchain_version_is_checked_without_installing_a_compiler_on_the_router(self):
-        lock = {"package_updates": {"golang": {"host_version": "1.26.6", "packages": {}}}}
-        with patch.object(prepare.subprocess, "check_output", return_value="go version go1.26.6 linux/amd64\n"):
-            self.assertEqual(prepare.verify_build_tools(self.tree, lock), {"golang": "1.26.6"})
-        with patch.object(prepare.subprocess, "check_output", return_value="go version go1.26.3 linux/amd64\n"):
+        lock = {"package_updates": {
+            "golang": {"host_version": "1.26.11", "packages": {}},
+            "golang1.27": {"host_version": "1.27.4", "packages": {}},
+        }}
+        versions = {
+            str(self.tree / "staging_dir/hostpkg/lib/go-1.26/bin/go"): "go version go1.26.11 linux/amd64\n",
+            str(self.tree / "staging_dir/hostpkg/lib/go-1.27/bin/go"): "go version go1.27.4 linux/amd64\n",
+        }
+        with patch.object(prepare.subprocess, "check_output", side_effect=lambda cmd, **_: versions[cmd[0]]):
+            self.assertEqual(prepare.verify_build_tools(self.tree, lock),
+                             {"golang": "1.26.11", "golang1.27": "1.27.4"})
+        versions[str(self.tree / "staging_dir/hostpkg/lib/go-1.27/bin/go")] = "go version go1.27.3 linux/amd64\n"
+        with patch.object(prepare.subprocess, "check_output", side_effect=lambda cmd, **_: versions[cmd[0]]):
             with self.assertRaisesRegex(ValueError, "toolchain version"):
                 prepare.verify_build_tools(self.tree, lock)
 

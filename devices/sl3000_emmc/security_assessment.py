@@ -19,14 +19,17 @@ COMPONENTS = {
     "mbedtls": ("openwrt", "package/libs/mbedtls", ("libmbedtls*",), None),
     "wolfssl": ("openwrt", "package/libs/wolfssl", ("libwolfssl*",), None),
     "openssl": ("openwrt", "package/libs/openssl", ("libopenssl*", "openssl-util"), None),
+    "ca-certificates": ("openwrt", "package/system/ca-certificates", ("ca-bundle", "ca-certificates"), None),
     "cgi-io": ("packages", "net/cgi-io", ("cgi-io",), "openwrt/cgi-io"),
     "curl": ("packages", "net/curl", ("curl", "libcurl*"), None),
     "nghttp2": ("packages", "libs/nghttp2", ("libnghttp2*", "nghttp2*"), None),
     "expat": ("packages", "libs/expat", ("libexpat*",), None),
     "c-ares": ("packages", "libs/c-ares", ("libcares*",), None),
     "bind": ("packages", "net/bind", ("bind-*",), None),
+    "miniupnpd": ("packages", "net/miniupnpd", ("miniupnpd*",), None),
     "tailscale": ("packages", "net/tailscale", ("tailscale",), None),
     "golang": ("packages", "lang/golang/golang1.26", (), None),
+    "golang1.27": ("packages", "lang/golang/golang1.27", (), None),
     "xray-core": ("passwall_packages", "xray-core", ("xray-core",), None),
     "sing-box": ("passwall_packages", "sing-box", ("sing-box",), None),
     "passwall": ("passwall", "luci-app-passwall", ("luci-app-passwall",), None),
@@ -47,6 +50,10 @@ UHTTPD_FIXES = {
 MOUNTS_ADVISORY = "GHSA-v5f9-62c7-cw29"
 # Each inner group requires any feature; all groups must be satisfied.
 TAILSCALE_CONDITIONS = {
+    "TS-2026-017": (("tailscale_serve", "tailscale_funnel"),),
+    "TS-2026-016": (("tailscale_serve", "tailscale_funnel"), ("tailscale_nonroot_operator", "tailscale_writable_serve_backends")),
+    "TS-2026-015": (("tailscale_ssh",),),
+    "TS-2026-014": (("tailscale_ssh",), ("tailscale_ssh_forwarding",)),
     "TS-2026-011": (("tailscale_4via6",),),
     "TS-2026-010": (("tailscale_ssh",), ("tailscale_ssh_accept_env",)),
     "TS-2026-009": (("tailscale_ssh",), ("tailscale_ssh_nonroot_policy",)),
@@ -82,9 +89,9 @@ def applicability(identifier, policy):
 
 
 def packages_for(name, inventory):
-    if name == "golang":
-        current = inventory.get("build_tools", {}).get("golang")
-        return {"golang/host": current} if current else {}
+    if name in ("golang", "golang1.27"):
+        current = inventory.get("build_tools", {}).get(name)
+        return {f"{name}/host": current} if current else {}
     selectors = COMPONENTS[name][2] if name in COMPONENTS else (name,)
     return {package: version for package, version in inventory["packages"].items()
             if any(fnmatchcase(package, selector) for selector in selectors)}
@@ -123,19 +130,6 @@ def scope_exclusion(sha, inventory):
         return "This MLO/EHT fix requires 802.11be support, disabled in this build"
     if sha == "1e02e8d8f1feb74151ef1c06c16432eea774f7b8" and "bind-server" not in inventory["packages"]:
         return "Only bind-dig/bind-libs are installed; named resolver issues require separate applicability review"
-    if sha == "8ff015a72b863697197c471b19e73ecdccac6914":
-        # fd757101513241b0d56d91778d0559164d4fe619 introduced reporting_detail
-        # after this recipe. Its ubus.c has neither the field nor its writes.
-        # Exclude only the verified recipe and the reviewed ucode-only patch;
-        # any different source or additional backport requires reassessment.
-        update = inventory.get("verified_package_updates", {}).get("hostapd", {})
-        if (update.get("source") == "openwrt"
-                and update.get("path") == "package/network/services/hostapd"
-                and update.get("commit") == "f0a60eee2fe051741c643ea6118718aae1ef17fb"
-                and update.get("patches") == [{
-                    "file": "hostapd/900-apsta-reset-clients.patch", "origin": "local",
-                    "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"}]):
-            return "Verified hostapd source predates reporting_detail support; the reviewed AP+STA patch only changes ucode.c"
     return None
 
 
@@ -182,23 +176,31 @@ def assess(github, lock, inventory, report, policy=None):
         _, repo, sha = signal["key"].split(":", 2)
         name = signal["title"].split(":", 1)[0].strip().lower()
         if name.startswith("luci-"):
-            selected = packages_for(name, inventory)
-            paths = (f"applications/{name}/", f"modules/{name}/", f"protocols/{name}/", f"libs/{name}/")
+            targets = (name,)
+            paths_by_target = {name: (f"applications/{name}/", f"modules/{name}/", f"protocols/{name}/", f"libs/{name}/")}
             feed = "luci"
             expected_repo = sources.get("luci", {}).get("repository")
+        elif name == "golang":
+            targets = ("golang", "golang1.27")
+            paths_by_target = {item: (COMPONENTS[item][1] + "/",) for item in targets}
+            feed = "packages"
+            expected_repo = sources.get("packages", {}).get("repository")
         elif name in COMPONENTS:
-            selected = packages_for(name, inventory)
+            targets = (name,)
             feed, path, _, _ = COMPONENTS[name]
-            paths, expected_repo = (path + "/",), sources.get(feed, {}).get("repository")
+            paths_by_target = {name: (path + "/",)}
+            expected_repo = sources.get(feed, {}).get("repository")
         else:
             continue
-        if not selected:
+        installed = [item for item in targets if packages_for(item, inventory)]
+        if not installed:
             # Go's standard library is linked into installed applications even
             # when the compiler is absent from the target package manifest.
-            signal["assessment"] = "needs_review" if name == "golang" else "not_installed"
+            signal["assessment"] = "needs_review" if name in ("golang", "golang1.27") else "not_installed"
             continue
-        update = updates.get(name)
-        if not update and any(path.startswith(paths) for path in inventory.get("source_overrides", {}).get(feed, [])):
+        if any(not updates.get(item) and any(path.startswith(paths_by_target[item])
+                                             for path in inventory.get("source_overrides", {}).get(feed, []))
+               for item in installed):
             signal.update(assessment="needs_review", reason="Custom source changes require backport verification")
             continue
         excluded = scope_exclusion(sha, inventory)
@@ -210,25 +212,42 @@ def assess(github, lock, inventory, report, policy=None):
         try:
             change = github.get(f"repos/{repo}/commits/{sha}")
             message = change["commit"]["message"]
-            if update:
+            matched = [item for item in installed
+                       if any(entry["filename"].startswith(paths_by_target[item]) for entry in change["files"])]
+            if len(installed) == 1 and updates.get(installed[0]) and not matched:
+                matched = installed
+            if not matched:
+                continue
+            pending, diverged = [], False
+            for item in matched:
+                update = updates.get(item)
+                if not update:
+                    pending.append(item)
+                    continue
                 status = "identical" if sha == update["commit"] else github.get(
                     f"repos/{repo}/compare/{sha}...{update['commit']}")["status"]
                 if status in ("ahead", "identical"):
-                    signal["assessment"] = "fixed_in_inventory"
-                    fixed_advisories.update({key: signal["url"] for key in GHSA.findall(message)})
                     continue
                 if status != "behind":
-                    signal.update(assessment="needs_review", reason="Package update and feed fix have diverged histories")
-                    continue
-            if not SECURITY_FIX.search(message) or not any(
-                    item["filename"].startswith(paths) for item in change["files"]):
+                    diverged = True
+                else:
+                    pending.append(item)
+            if not pending and not diverged:
+                signal["assessment"] = "fixed_in_inventory"
+                fixed_advisories.update({key: signal["url"] for key in GHSA.findall(message)})
+                continue
+            if diverged:
+                signal.update(assessment="needs_review", reason="Package update and feed fix have diverged histories")
+                continue
+            if not SECURITY_FIX.search(message):
                 continue
             identifiers = GHSA.findall(message)
             if identifiers and all(applicability(key, policy) is False for key in identifiers):
                 signal.update(assessment="scope_excluded", reason="Excluded by the declared usage policy")
                 continue
             signal["assessment"] = "fix_pending"
-            add(name, signal["key"], signal["title"], signal["url"], message, "feed_security_update")
+            for item in pending:
+                add(item, signal["key"], signal["title"], signal["url"], message, "feed_security_update")
         except (RuntimeError, ValueError, KeyError, TypeError) as error:
             errors.append(f"Assess {name}: {error}")
 
@@ -334,6 +353,9 @@ def assess(github, lock, inventory, report, policy=None):
             continue
         if advisory["repository"] == "tailscale/tailscale" and re.search(r"\b(?:Windows|FreeBSD)\b", title):
             advisory["status"] = "other_platform"
+            continue
+        if identifier == "TS-2026-012" and "libtailscale" not in inventory["packages"]:
+            advisory.update(status="not_installed", reason="Only tailscaled/tailscale CLI is installed; libtailscale is not included")
             continue
         name = {"XTLS/Xray-core": "xray-core", "SagerNet/sing-box": "sing-box",
                 "tailscale/tailscale": "tailscale", "MetaCubeX/mihomo": "mihomo"}.get(advisory["repository"])

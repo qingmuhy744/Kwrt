@@ -11,6 +11,10 @@ import subprocess
 
 HERE = Path(__file__).resolve().parent
 PROXY_PACKAGES = ("chinadns-ng", "dns2socks", "ipt2socks", "microsocks", "tcping", "sing-box", "xray-core")
+GO_TOOLCHAINS = {
+    "golang": ("lang/golang/golang1.26", r"1\.26\.[0-9]+", "staging_dir/hostpkg/lib/go-1.26/bin/go"),
+    "golang1.27": ("lang/golang/golang1.27", r"1\.27\.[0-9]+", "staging_dir/hostpkg/lib/go-1.27/bin/go"),
+}
 VNSTAT_FILES = (
     ("vnstat.conf", "etc/vnstat.conf"),
     ("vnstat.config", "etc/config/vnstat"),
@@ -50,9 +54,11 @@ def validate_lock(lock):
             if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", update.get("version", "")) or not re.fullmatch(
                     r"[0-9a-f]{64}", update.get("sha256", "")):
                 raise ValueError("Source version overrides require a stable version and SHA-256")
-        if "host_version" in update and (name != "golang" or source != "packages" or
-                path != "lang/golang/golang1.26" or not re.fullmatch(r"1\.26\.[0-9]+", update["host_version"])):
-            raise ValueError("Unsupported host toolchain update")
+        if "host_version" in update:
+            toolchain = GO_TOOLCHAINS.get(name)
+            if (not toolchain or source != "packages" or path != toolchain[0]
+                    or not re.fullmatch(toolchain[1], update["host_version"])):
+                raise ValueError("Unsupported host toolchain update")
         if (not update.get("packages") and "host_version" not in update) or any(not re.fullmatch(r"[A-Za-z0-9+_.-]+", package)
                 or not re.fullmatch(r"[^\s]+-r[0-9]+", version) for package, version in update["packages"].items()):
             raise ValueError("Package updates must declare expected APK versions")
@@ -173,7 +179,10 @@ def verify_build_tools(tree, lock):
     for name, update in lock.get("package_updates", {}).items():
         if "host_version" not in update:
             continue
-        compiler = tree / "staging_dir/hostpkg/lib/go-1.26/bin/go"
+        toolchain = GO_TOOLCHAINS.get(name)
+        if not toolchain:
+            raise ValueError("Unsupported host toolchain update")
+        compiler = tree / toolchain[2]
         output = subprocess.check_output([str(compiler), "version"], text=True).strip()
         if not output.startswith("go version go" + update["host_version"] + " "):
             raise ValueError("Go build toolchain version differs from lock")
@@ -232,8 +241,8 @@ def prepare_vnstat(tree):
 
 
 def prepare(tree):
-    import factory_test
-    factory_test.preflight()
+    import factory_eeprom
+    factory_eeprom.preflight()
     lock = json.loads((HERE / "sources.lock.json").read_text())
     validate_lock(lock)
     tree.mkdir(parents=True, exist_ok=True)
@@ -256,7 +265,7 @@ def prepare(tree):
     shutil.copy2(HERE / "files/mt7981b-sl-3000-emmc.dts", tree / "target/linux/mediatek/dts/")
     import nor_probe
     nor_probe.prepare(tree)
-    factory_test.prepare(tree)
+    factory_eeprom.prepare(tree)
     base = tree / "target/linux/mediatek/filogic/base-files"
     prepare_network(base)
     shutil.copy2(HERE / "files/sl3000-upgrade.sh", base / "lib/upgrade/")

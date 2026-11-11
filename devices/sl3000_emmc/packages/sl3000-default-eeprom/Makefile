@@ -13,7 +13,7 @@ include $(INCLUDE_DIR)/package.mk
 define Package/sl3000-default-eeprom
   SECTION:=firmware
   CATEGORY:=Firmware
-  TITLE:=MT7981 default EEPROM for SL-3000 bootstrap hardware validation
+  TITLE:=MT7981 generic fallback EEPROM for SL-3000 eMMC
   DEPENDS:=@TARGET_mediatek_filogic
 endef
 
