@@ -79,6 +79,7 @@ PassWall、OpenClash、Tailscale、UPnP 默认关闭。镜像内不包含任何�
 | Go 1.26 / Go 1.27 构建工具链 | `1.26.11` / `1.27.4` | 同时跟踪并校验 `golang`（供 `xray-core`、`sing-box` 编译）与 `golang1.27`（满足 Tailscale `1.104.6` `go.mod` 要求）；编译器不安装到路由器，CI 收集安全清单时逐一核验实际主机编译器版本 |
 | ubus | `2026.06.28~24864e78-r3` | 在基线源码上回移 `3930745d8593`、`5331c00f37f7`、`955ff3f7030c`、`bde609c2400e` 四个上游修复并递增发布号 |
 | hostapd / wpad | `2025.08.26~ca266cc2-r8` | 在基线 `-r7` 源码上应用本地 `900-apsta-reset-clients.patch` 并递增发布号至 `-r8` |
+| dns2socks | `2.1-r3` | 导入 `passwall_packages` 提交 `3ce5cebb8033`（改为本地 `src/` 源码，避免上游删除旧 `SourceCode.zip` 附件导致下载失败） |
 | Mihomo | `1.19.33-r1` | 固定上游正式版 `v1.19.33` AArch64 二进制并校验 SHA-256 与 ELF 架构 |
 | LuCI 挂载权限加固 | `GHSA-v5f9-62c7-cw29` | `hardening.py` 移除 `luci-mod-system-mounts` 对 `/etc/crontabs/root` 的多余写权限，产物校验从 SquashFS 实读 ACL 复核 |
 

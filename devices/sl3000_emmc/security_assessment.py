@@ -32,6 +32,7 @@ COMPONENTS = {
     "golang1.27": ("packages", "lang/golang/golang1.27", (), None),
     "xray-core": ("passwall_packages", "xray-core", ("xray-core",), None),
     "sing-box": ("passwall_packages", "sing-box", ("sing-box",), None),
+    "dns2socks": ("passwall_packages", "dns2socks", ("dns2socks",), None),
     "passwall": ("passwall", "luci-app-passwall", ("luci-app-passwall",), None),
     "openclash": ("openclash", "luci-app-openclash", ("luci-app-openclash",), None),
 }

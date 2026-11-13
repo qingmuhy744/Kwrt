@@ -89,6 +89,14 @@
           "sha256": "0d6ae295acb49f6e9c605b2e80da045d9e52c757514f4370ed33f598ff8348d5"
         }
       ]
+    },
+    "dns2socks": {
+      "source": "passwall_packages",
+      "path": "dns2socks",
+      "commit": "3ce5cebb8033b0ac8e4d314066b9e2bfc1e1b258",
+      "packages": {
+        "dns2socks": "2.1-r3"
+      }
     }
   },
   "mihomo": {
